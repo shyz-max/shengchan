@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+data.db
+backups/
+stderr.txt
+stdout.txt
+*.db
+.DS_Store
