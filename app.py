@@ -4536,6 +4536,9 @@ DATACENTER_HTML = BASE_HTML.replace('{% block content %}{% endblock %}','''
           <div class="dc-pagination-nav d-flex justify-content-between align-items-center px-3 py-2 bg-light border-top rounded-bottom" id="pnav-{{m.id}}" style="display:none;">
               <span class="small text-muted">共 <span class="fw-bold dc-pg-count">0</span> 项</span>
               <div class="d-flex align-items-center gap-2">
+                  <select class="form-select form-select-sm dc-pg-size" style="width:65px;font-size:11px;" onchange="DC_PAGE_SIZE=parseInt(this.value);dcUpdate(this.closest('.tab-pane').id)">
+                    <option value="10">10/页</option><option value="20" selected>20/页</option><option value="50">50/页</option><option value="100">100/页</option>
+                  </select>
                   <button class="btn btn-sm btn-outline-secondary py-0 dc-prev" disabled>&lt;</button>
                   <span class="small fw-bold dc-page-info">1 / 1</span>
                   <button class="btn btn-sm btn-outline-secondary py-0 dc-next" disabled>&gt;</button>
@@ -4587,6 +4590,7 @@ DATACENTER_HTML = BASE_HTML.replace('{% block content %}{% endblock %}','''
 
 <script>
 var DC_PAGE_SIZE = 20;
+var DC_PAGE_SIZES = [10, 20, 50, 100];
 var DC_PAGE_STATE = {};
 var dcCurrentTableId = '';
 
@@ -5001,7 +5005,7 @@ TEAM_KANBAN_HTML = BASE_HTML.replace('{% block content %}{% endblock %}','''
 
 .kanban-board { display: flex; gap: 12px; padding-bottom: 16px; align-items:stretch; }
 .kanban-board.single-view { overflow-x: auto; }
-.kanban-side-panel { flex: 0 0 260px; min-width: 240px; display: flex; flex-direction: column; gap: 10px; }
+.kanban-side-panel { flex: 1; min-width: 200px; display: flex; flex-direction: column; gap: 10px; }
 .task-chart-box { background: #fff; border: 1px solid #e2e8f0; border-radius: 10px; padding: 10px; }
 .task-stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-top: 8px; }
 .task-stat-tile { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 6px 4px; text-align: center; }
@@ -5086,7 +5090,7 @@ TEAM_KANBAN_HTML = BASE_HTML.replace('{% block content %}{% endblock %}','''
 .operator-checkbox:hover { background: #f1f5f9; }
 .operator-checkbox input[type=checkbox] { margin: 0; cursor: pointer; }
 
-.member-panel { flex:0 0 285px; min-width:270px; flex-shrink:0; padding:0 4px; }
+.member-panel { flex:1; min-width:200px; padding:0 4px; }
 .member-stats-container { display:flex; flex-direction:column; gap:6px; margin-bottom:8px; }
 .member-stat-card { background: #fff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 6px 10px; display: flex; align-items: center; gap: 8px; box-shadow: 0 1px 2px rgba(0,0,0,0.04); transition: all 0.15s; }
 .member-stat-card:hover { border-color: #93c5fd; box-shadow: 0 2px 8px rgba(59,130,246,0.12); transform: translateY(-1px); }
@@ -5100,7 +5104,7 @@ TEAM_KANBAN_HTML = BASE_HTML.replace('{% block content %}{% endblock %}','''
 .member-stat-bar-fill { height: 100%; background: #10b981; border-radius: 3px; transition: width 0.3s; }
 
 .member-task-list { margin-top: 6px; border-top: 1px solid #f1f5f9; padding-top: 4px; max-height: 140px; overflow-y: auto; background: #fafbfc; border-radius: 4px; padding: 4px; }
-.member-task-item { display: flex; align-items: center; gap: 4px; padding: 2px 0; font-size: 13px; color: #475569; cursor: pointer; }
+.member-task-item { display: flex; align-items: center; gap: 4px; padding: 2px 0; font-size: 12px; color: #475569; cursor: pointer; }
 .member-task-item:hover { color: #1e293b; background: #f8fafc; }
 .mt-sn { font-weight: 700; color: #1e293b; min-width: 32px; }
 .mt-info { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -5354,7 +5358,7 @@ function toggleMemberView(btn) { var panel = btn.closest('.member-panel'); if (!
 
 function renderMemberStats(team) { var container = $p('.member-stats-container'); var chartWrap = $p('.member-chart-wrap'); var stats = memberStatsMap[team] || []; var members = membersMap[team] || []; var merged = {}; members.forEach(function(m) { merged[m.name] = {name: m.name, todo: 0, doing: 0, done: 0}; }); stats.forEach(function(s) { if (!merged[s.name]) return; merged[s.name].todo += s.todo; merged[s.name].doing += s.doing; merged[s.name].done += s.done; }); var chartData = Object.values(merged); chartData.sort(function(a, b) { return (b.todo + b.doing + b.done) - (a.todo + a.doing + a.done); }); if (!chartData.length) { if (container) container.innerHTML = '<span style="font-size:12px;color:#94a3b8;">暂无人员任务统计</span>'; if (chartWrap) chartWrap.style.display = 'none'; if (window.memberChart) { window.memberChart.destroy(); window.memberChart = null; } renderMemberTaskPanel(team); return; } var html = ''; chartData.forEach(function(s) { var total = s.todo + s.doing + s.done; var escapedName = s.name.replace(/'/g, "&#39;"); html += '<div class="member-stat-card" data-op-name="'+escapedName+'" style="cursor:pointer;" title="点击筛选该人员的任务"><div class="member-stat-name">'+s.name+'</div><div class="member-stat-nums"><span class="member-stat-num todo-num">'+s.todo+'</span><span class="member-stat-num doing-num">'+s.doing+'</span><span class="member-stat-num done-num">'+s.done+'</span></div><div class="member-stat-bar"><div class="member-stat-bar-fill" style="width:'+(total?Math.round(s.done/total*100):0)+'%"></div></div></div>'; }); if (container) container.innerHTML = html; renderMemberTaskPanel(team); if (chartWrap) chartWrap.style.height = Math.max(220, chartData.length * 24 + 80) + 'px'; var canvas = $p('.member-stats-chart'); if (!canvas) return; var ctx = canvas.getContext('2d'); if (window.memberChart) { window.memberChart.destroy(); } var labels = chartData.map(function(s) { return s.name; }); window.memberChart = new Chart(ctx, {type:'bar',data:{labels:labels,datasets:[{label:'待处理',data:chartData.map(function(s){return s.todo}),backgroundColor:'#94a3b8',borderRadius:4},{label:'处理中',data:chartData.map(function(s){return s.doing}),backgroundColor:'#d97706',borderRadius:4},{label:'已完成',data:chartData.map(function(s){return s.done}),backgroundColor:'#10b981',borderRadius:4}]},options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,scales:{x:{stacked:true,ticks:{stepSize:1,font:{size:10}}},y:{stacked:true,ticks:{font:{size:11}}}},plugins:{legend:{position:'top',labels:{boxWidth:12,padding:8,font:{size:11}}},datalabels:{display:false}}}}); }
 
-function renderMemberTaskPanel(team) { var panel = $p('.member-task-panel'); if (!panel) return; var tasks = memberTasksMap[team] || {}; var members = membersMap[team] || []; var memberNames = members.map(function(m) { return m.name; }); var names = Object.keys(tasks).filter(function(n) { return memberNames.indexOf(n) !== -1; }); if (!names.length) { panel.style.display = 'none'; return; } names.sort(function(a, b) { return tasks[b].length - tasks[a].length; }); var html = ''; names.forEach(function(name) { html += '<div style="font-size:14px;font-weight:700;color:#1e293b;padding:2px 6px;background:#e2e8f0;border-radius:3px;margin-bottom:2px;">'+name+' ('+tasks[name].length+')</div>'; tasks[name].forEach(function(t) { html += '<div class="member-task-item" data-task-id="'+t.id+'" style="padding:2px 6px;"><span class="mt-sn">'+t.sn+'</span><span class="mt-info">'+t.pn+' | '+t.dn+(t.bn?' | '+t.bn:'')+'</span><span class="mt-qty">'+t.qty+'</span></div>'; }); }); panel.innerHTML = html; panel.style.display = 'block'; }
+function renderMemberTaskPanel(team) { var panel = $p('.member-task-panel'); if (!panel) return; var tasks = memberTasksMap[team] || {}; var members = membersMap[team] || []; var memberNames = members.map(function(m) { return m.name; }); var names = Object.keys(tasks).filter(function(n) { return memberNames.indexOf(n) !== -1; }); if (!names.length) { panel.style.display = 'none'; return; } names.sort(function(a, b) { return tasks[b].length - tasks[a].length; }); var html = ''; names.forEach(function(name) { html += '<div style="font-size:12px;font-weight:700;color:#1e293b;padding:2px 6px;background:#e2e8f0;border-radius:3px;margin-bottom:2px;">'+name+' ('+tasks[name].length+')</div>'; tasks[name].forEach(function(t) { html += '<div class="member-task-item" data-task-id="'+t.id+'" style="padding:2px 6px;"><span class="mt-sn">'+t.sn+'</span><span class="mt-info">'+t.pn+' | '+t.dn+(t.bn?' | '+t.bn:'')+'</span><span class="mt-qty">'+t.qty+'</span></div>'; }); }); panel.innerHTML = html; panel.style.display = 'block'; }
 
 function renderTaskStats(team) {
   var stat = taskStatsMap[team] || {todo:0, doing:0, done:0, overdue:0};
