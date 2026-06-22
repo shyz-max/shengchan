@@ -197,6 +197,30 @@ class SystemFeedback(db.Model):
     replied_time = db.Column(db.DateTime)
     user = db.relationship('User', backref='feedbacks')
 
+class WorkHour(db.Model):
+    __tablename__ = 'work_hours'
+    id = db.Column(db.Integer, primary_key=True)
+    task_id = db.Column(db.Integer, db.ForeignKey('production_tasks.id'))
+    team = db.Column(db.String(50))
+    worker = db.Column(db.String(50))
+    hours = db.Column(db.Numeric(5,1))
+    work_date = db.Column(db.DateTime)
+    content = db.Column(db.Text)
+    created_by = db.Column(db.Integer)
+    created_time = db.Column(db.DateTime, default=bj_now)
+
+class FundPlan(db.Model):
+    __tablename__ = 'fund_plans'
+    id = db.Column(db.Integer, primary_key=True)
+    team = db.Column(db.String(50))
+    plan_month = db.Column(db.String(7))
+    category = db.Column(db.String(50))
+    item_name = db.Column(db.String(200))
+    amount = db.Column(db.Numeric(12,2))
+    remark = db.Column(db.Text)
+    created_by = db.Column(db.Integer)
+    created_time = db.Column(db.DateTime, default=bj_now)
+
 @login_manager.user_loader
 def load_user(user_id):
     return db.session.get(User, int(user_id))
@@ -261,6 +285,16 @@ def role_required(role_name):
 def fmt_date(val):
     return val.strftime('%Y/%m/%d') if val else ''
 
+def parse_month_filter(value):
+    try:
+        year, month = (value or '').split('-', 1)
+        year, month = int(year), int(month)
+        if 1 <= month <= 12:
+            return year, month
+    except (TypeError, ValueError):
+        pass
+    return None, None
+
 def derive_stage_from_batch(batch_no):
     if not batch_no or not batch_no.strip():
         return ''
@@ -322,7 +356,30 @@ def index():
 def task_list():
     view_cols, edit_cols = get_user_permissions()
     view_cols.update({'id','serial_no','responsible_person','product_category','product_name','plan_delivery_time'})
+    month_filter = request.args.get('month', '').strip()
+    category_filter = request.args.get('cat', '').strip()
     tasks = ProductionTask.query.order_by(ProductionTask.id).all()
+
+    available_months = set()
+    for t in tasks:
+        if t.plan_delivery_time:
+            available_months.add(t.plan_delivery_time.strftime('%Y-%m'))
+    available_months = sorted(available_months, reverse=True)
+
+    if month_filter:
+        try:
+            year, month = month_filter.split('-')
+            year, month = int(year), int(month)
+            tasks = [t for t in tasks if t.plan_delivery_time and t.plan_delivery_time.year == year and t.plan_delivery_time.month == month]
+        except:
+            pass
+
+    if category_filter:
+        if category_filter == '头盔面罩':
+            tasks = [t for t in tasks if t.product_category in ('头盔','面罩')]
+        else:
+            tasks = [t for t in tasks if t.product_category == category_filter]
+
     task_ids = [t.id for t in tasks]
     
     all_issues = IssueRecord.query.filter(IssueRecord.task_id.in_(task_ids)).all()
@@ -407,7 +464,7 @@ def task_list():
             else:
                 final_visible.append((f,n))
                 
-    return render_template_string(TASK_LIST_HTML, rows=rows, columns=final_visible, edit_cols=edit_cols, center_cols=CENTER_COLUMNS)
+    return render_template_string(TASK_LIST_HTML, rows=rows, columns=final_visible, edit_cols=edit_cols, center_cols=CENTER_COLUMNS, available_months=available_months, month_filter=month_filter, category_filter=category_filter)
 
 @app.route('/api/task/new_empty', methods=['POST'])
 @login_required
@@ -948,6 +1005,13 @@ def dashboard():
     return render_template_string(DASHBOARD_HTML, rate1=rate1, on_time_output=on_time_output, rate2=rate2, done_output=done_output, rate3=rate3, delayed_done_output=delayed_done_output, penalty_count=penalty_count, penalty_amount=penalty_amount, penalty_tasks=penalty_tasks, not_on_time_output=not_on_time_output, quality_list=quality_list, in_progress_for_template=in_progress_for_template, monthly_delivery_list=monthly_delivery_list, done_not_stored_tasks=done_not_stored_tasks, warnings=warnings, m_issues_data=m_issues_data, m_shortages_data=m_shortages_data, on_time=on_time, total_monthly=total_monthly, selected_year=selected_year, selected_month=selected_month, year_range=year_range)
 
 # ---------- 质量问题一本账导出 ----------
+@app.route('/export/quality-redirect')
+@login_required
+@role_required('部门领导')
+def export_quality_redirect():
+    now = bj_now()
+    return redirect(url_for('export_quality', year=now.year, month=now.month))
+
 @app.route('/export/quality')
 @login_required
 def export_quality():
@@ -1049,6 +1113,13 @@ def export_quality():
         return f'Export error: {str(e)}\n{traceback.format_exc()}', 500
 
 # ---------- 违约金任务分析报告导出 ----------
+@app.route('/export/penalty-redirect')
+@login_required
+@role_required('部门领导')
+def export_penalty_redirect():
+    now = bj_now()
+    return redirect(url_for('export_penalty', year=now.year, month=now.month))
+
 @app.route('/export/penalty')
 @login_required
 def export_penalty():
@@ -1760,8 +1831,10 @@ def datacenter():
 @app.route('/teamkanban')
 @login_required
 def team_kanban():
-    month_filter = request.args.get('month', '')
+    month_filter = request.args.get('month', '').strip()
     selected_team = request.args.get('team', '')
+    if not month_filter:
+        month_filter = ''
     db.session.expire_all()
     tasks = ProductionTask.query.all()
     now = bj_now()
@@ -1772,11 +1845,13 @@ def team_kanban():
             available_months.add(t.plan_delivery_time.strftime('%Y-%m'))
     available_months = sorted(available_months, reverse=True)
 
-    if month_filter:
-        year, month = month_filter.split('-')
+    year, month = parse_month_filter(month_filter)
+    if year and month:
         tasks = [t for t in tasks if t.plan_delivery_time and
-                 t.plan_delivery_time.year == int(year) and
-                 t.plan_delivery_time.month == int(month)]
+                 t.plan_delivery_time.year == year and
+                 t.plan_delivery_time.month == month]
+    elif month_filter:
+        month_filter = ''
 
     teams = ['裁剪','缝纫','粘胶','总装1','总装2','氧调','热风热合']
     team_field_map = {
@@ -1908,11 +1983,45 @@ def team_kanban():
     for m in TeamMember.query.all():
         members_data.setdefault(m.team, []).append({'id': m.id, 'name': m.name})
 
+    member_stats_data = {
+        team: [
+            {'name': name, 'todo': stat['todo'], 'doing': stat['doing'], 'done': stat['done']}
+            for name, stat in kanban_data[team]['member_stats'].items()
+        ]
+        for team in teams
+    }
+    member_tasks_data = {}
+    for team in teams:
+        member_tasks_data[team] = {}
+        for op, items in kanban_data[team]['member_tasks'].items():
+            member_tasks_data[team][op] = [
+                {
+                    'id': it['id'],
+                    'sn': it['serial_no'] or '',
+                    'dn': it['product_draw_no'] or '',
+                    'pn': it['product_name'] or '',
+                    'bn': it['batch_no'] or '',
+                    'qty': it['total_qty'] or ''
+                }
+                for it in items
+            ]
+    task_stats_data = {
+        team: {
+            'todo': len(kanban_data[team]['todo']),
+            'doing': len(kanban_data[team]['doing']),
+            'done': len(kanban_data[team]['done']),
+            'overdue': kanban_data[team]['overdue_count'],
+        }
+        for team in teams
+    }
+
     branch_notices = BranchNotice.query.filter(BranchNotice.target.in_(['班组','全部'])).order_by(BranchNotice.created_time.desc()).limit(5).all()
 
     resp = make_response(render_template_string(TEAM_KANBAN_HTML,
         kanban_data=kanban_data, teams=teams, fmt_date=fmt_date,
         now=now, global_stats=global_stats, members_data=members_data,
+        member_stats_data=member_stats_data, member_tasks_data=member_tasks_data,
+        task_stats_data=task_stats_data,
         month_filter=month_filter, available_months=available_months,
         selected_team=selected_team, branch_notices=branch_notices))
     resp.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate, max-age=0'
@@ -1952,11 +2061,13 @@ def delete_branch_notice(notice_id):
 def team_kanban_done(team):
     month_filter = request.args.get('month', '')
     tasks = ProductionTask.query.all()
-    if month_filter:
-        year, month = month_filter.split('-')
+    year, month = parse_month_filter(month_filter)
+    if year and month:
         tasks = [t for t in tasks if t.plan_delivery_time and
-                 t.plan_delivery_time.year == int(year) and
-                 t.plan_delivery_time.month == int(month)]
+                 t.plan_delivery_time.year == year and
+                 t.plan_delivery_time.month == month]
+    elif month_filter:
+        month_filter = ''
     team_field_map = {
         '裁剪': ('cut_start', 'cut_end'), '缝纫': ('sew_start', 'sew_end'),
         '粘胶': ('glue_start', 'glue_end'), '总装1': ('assembly1_start', 'assembly1_end'),
@@ -1991,11 +2102,13 @@ def team_kanban_done(team):
 def team_kanban_done_export(team):
     month_filter = request.args.get('month', '')
     tasks = ProductionTask.query.all()
-    if month_filter:
-        year, month = month_filter.split('-')
+    year, month = parse_month_filter(month_filter)
+    if year and month:
         tasks = [t for t in tasks if t.plan_delivery_time and
-                 t.plan_delivery_time.year == int(year) and
-                 t.plan_delivery_time.month == int(month)]
+                 t.plan_delivery_time.year == year and
+                 t.plan_delivery_time.month == month]
+    elif month_filter:
+        month_filter = ''
     team_field_map = {
         '裁剪': ('cut_start', 'cut_end'), '缝纫': ('sew_start', 'sew_end'),
         '粘胶': ('glue_start', 'glue_end'), '总装1': ('assembly1_start', 'assembly1_end'),
@@ -2261,6 +2374,118 @@ def api_shortage_add():
     db.session.add(OperationLog(task_id=task.id, operated_by=current_user.id, operated_time=now, field_name='shortage', operation_type='添加缺件', new_value=sr.content[:50] if sr.content else ''))
     db.session.commit()
     return jsonify({'success': True, 'id': sr.id})
+
+# ---------- 工时填报 ----------
+@app.route('/work-hours')
+@login_required
+def work_hours():
+    now = bj_now()
+    team_filter = request.args.get('team', '')
+    records = WorkHour.query.order_by(WorkHour.work_date.desc()).limit(200).all()
+    if team_filter:
+        records = [r for r in records if r.team == team_filter]
+    tasks = ProductionTask.query.order_by(ProductionTask.serial_no).all()
+    teams = ['裁剪','缝纫','粘胶','总装1','总装2','氧调','热风热合']
+    resp = make_response(render_template_string(WORK_HOURS_HTML, records=records, tasks=tasks, teams=teams, team_filter=team_filter, fmt_date=fmt_date))
+    resp.headers['Cache-Control'] = 'no-cache'
+    return resp
+
+@app.route('/api/work-hours/add', methods=['POST'])
+@login_required
+def api_work_hours_add():
+    data = request.get_json()
+    task_id = data.get('task_id')
+    if not task_id: return jsonify({'error': '请选择任务'}), 400
+    task = db.session.get(ProductionTask, int(task_id))
+    if not task: return jsonify({'error': '任务不存在'}), 404
+    wh = WorkHour(
+        task_id=task.id,
+        team=(data.get('team') or '').strip(),
+        worker=(data.get('worker') or '').strip(),
+        hours=float(data.get('hours') or 0) if data.get('hours') else None,
+        work_date=parse_date_slash(data.get('work_date')) or bj_now(),
+        content=(data.get('content') or '').strip()[:200],
+        created_by=current_user.id
+    )
+    db.session.add(wh)
+    db.session.commit()
+    return jsonify({'success': True, 'id': wh.id})
+
+# ---------- 工时汇总 ----------
+@app.route('/work-hours-summary')
+@login_required
+def work_hours_summary():
+    team_filter = request.args.get('team', '')
+    records = WorkHour.query.all()
+    if team_filter:
+        records = [r for r in records if r.team == team_filter]
+    teams = ['裁剪','缝纫','粘胶','总装1','总装2','氧调','热风热合']
+    summary = {}
+    for r in records:
+        key = r.team or '未指定'
+        summary.setdefault(key, {'total': 0, 'workers': {}})
+        summary[key]['total'] += float(r.hours or 0)
+        w = r.worker or ''
+        summary[key]['workers'].setdefault(w, 0)
+        summary[key]['workers'][w] += float(r.hours or 0)
+    total_all = sum(v['total'] for v in summary.values())
+    resp = make_response(render_template_string(WORK_HOURS_SUMMARY_HTML, summary=summary, total_all=total_all, teams=teams, team_filter=team_filter))
+    resp.headers['Cache-Control'] = 'no-cache'
+    return resp
+
+# ---------- 资金计划填报 ----------
+@app.route('/fund-plan-report')
+@login_required
+def fund_plan_report():
+    team_filter = request.args.get('team', '')
+    records = FundPlan.query.order_by(FundPlan.created_time.desc()).limit(200).all()
+    if team_filter:
+        records = [r for r in records if r.team == team_filter]
+    teams = ['裁剪','缝纫','粘胶','总装1','总装2','氧调','热风热合']
+    resp = make_response(render_template_string(FUND_PLAN_REPORT_HTML, records=records, teams=teams, team_filter=team_filter, fmt_date=fmt_date))
+    resp.headers['Cache-Control'] = 'no-cache'
+    return resp
+
+@app.route('/api/fund-plan/add', methods=['POST'])
+@login_required
+def api_fund_plan_add():
+    data = request.get_json()
+    fp = FundPlan(
+        team=(data.get('team') or '').strip(),
+        plan_month=(data.get('plan_month') or '').strip(),
+        category=(data.get('category') or '').strip(),
+        item_name=(data.get('item_name') or '').strip()[:200],
+        amount=float(data.get('amount') or 0) if data.get('amount') else None,
+        remark=(data.get('remark') or '').strip()[:500],
+        created_by=current_user.id
+    )
+    if not fp.team or not fp.item_name: return jsonify({'error': '请填写班组和项目名称'}), 400
+    db.session.add(fp)
+    db.session.commit()
+    return jsonify({'success': True, 'id': fp.id})
+
+# ---------- 资金计划汇总 ----------
+@app.route('/fund-plan-summary')
+@login_required
+def fund_plan_summary():
+    team_filter = request.args.get('team', '')
+    records = FundPlan.query.all()
+    if team_filter:
+        records = [r for r in records if r.team == team_filter]
+    teams = ['裁剪','缝纫','粘胶','总装1','总装2','氧调','热风热合']
+    summary = {}
+    for r in records:
+        key = r.team or '未指定'
+        summary.setdefault(key, {'total': 0, 'items': []})
+        summary[key]['total'] += float(r.amount or 0)
+        summary[key]['items'].append({
+            'plan_month': r.plan_month, 'category': r.category, 'item_name': r.item_name,
+            'amount': float(r.amount or 0), 'remark': r.remark
+        })
+    total_all = sum(v['total'] for v in summary.values())
+    resp = make_response(render_template_string(FUND_PLAN_SUMMARY_HTML, summary=summary, total_all=total_all, teams=teams, team_filter=team_filter))
+    resp.headers['Cache-Control'] = 'no-cache'
+    return resp
 
 @app.route('/planning-task-report')
 @login_required
@@ -2686,6 +2911,102 @@ def admin_notices_delete(notice_id):
         flash('通知已删除', 'success')
     return redirect(url_for('admin_notices'))
 
+# ---------- 导出预览 ----------
+@app.route('/preview/penalty')
+@login_required
+@role_required('部门领导')
+def preview_penalty():
+    now = bj_now()
+    selected_year = request.args.get('year', str(now.year))
+    selected_month = request.args.get('month', str(now.month))
+    try: selected_year = int(selected_year)
+    except: selected_year = now.year
+    try: selected_month = int(selected_month)
+    except: selected_month = now.month
+    month_start = datetime(selected_year, selected_month, 1)
+    if selected_month == 12: month_end = datetime(selected_year + 1, 1, 1)
+    else: month_end = datetime(selected_year, selected_month + 1, 1)
+    tasks = ProductionTask.query.all()
+    penalty_tasks = [t for t in tasks if t.plan_delivery_time and month_start <= t.plan_delivery_time < month_end and t.liquidated_damages == '是']
+    penalty_list = []
+    for t in penalty_tasks:
+        status = '已入库' if t.storage_time else ('已交总检' if t.final_check_time else ('生产中' if any([t.cut_start,t.sew_start,t.glue_start,t.assembly1_start,t.assembly2_start,t.oxygen_start,t.heat_seal_start]) else '未开工'))
+        penalty_list.append({
+            'id': t.id, 'serial_no': t.serial_no, 'product_category': t.product_category or '',
+            'product_draw_no': t.product_draw_no or '', 'product_name': t.product_name,
+            'batch_no': t.batch_no or '', 'total_qty': t.total_qty,
+            'plan_delivery_time': t.plan_delivery_time, 'final_check_time': t.final_check_time,
+            'storage_time': t.storage_time, 'output_value': float(t.output_value or 0),
+            'production_status': status,
+        })
+    total_val = sum(t['output_value'] for t in penalty_list)
+    year_range = list(range(2024, now.year + 6))
+    resp = make_response(render_template_string(PREVIEW_PENALTY_HTML,
+        penalty_list=penalty_list, selected_year=selected_year, selected_month=selected_month,
+        total_val=total_val, year_range=year_range, fmt_date=fmt_date))
+    resp.headers['Cache-Control'] = 'no-cache'
+    return resp
+
+@app.route('/preview/quality')
+@login_required
+@role_required('部门领导')
+def preview_quality():
+    now = bj_now()
+    selected_year = request.args.get('year', str(now.year))
+    selected_month = request.args.get('month', str(now.month))
+    try: selected_year = int(selected_year)
+    except: selected_year = now.year
+    try: selected_month = int(selected_month)
+    except: selected_month = now.month
+    month_start = datetime(selected_year, selected_month, 1)
+    if selected_month == 12: month_end = datetime(selected_year + 1, 1, 1)
+    else: month_end = datetime(selected_year, selected_month + 1, 1)
+    tasks = ProductionTask.query.all()
+    current_month_tasks = [t for t in tasks if t.plan_delivery_time and month_start <= t.plan_delivery_time < month_end]
+    task_ids = [t.id for t in tasks]
+    all_issues = IssueRecord.query.filter(IssueRecord.task_id.in_(task_ids)).all()
+    all_shortages = ShortageRecord.query.filter(ShortageRecord.task_id.in_(task_ids)).all()
+    issues_map = {}
+    for iss in all_issues: issues_map.setdefault(iss.task_id, []).append(iss)
+    shortages_map = {}
+    for sr in all_shortages: shortages_map.setdefault(sr.task_id, []).append(sr)
+    quality_list = []
+    for t in current_month_tasks:
+        t_issues = issues_map.get(t.id, [])
+        t_shortages = shortages_map.get(t.id, [])
+        if not t_issues and not t_shortages: continue
+        if t.final_check_time: prod_status = '已完成'
+        elif any([t.cut_start,t.sew_start,t.glue_start,t.assembly1_start,t.assembly2_start,t.oxygen_start,t.heat_seal_start]): prod_status = '生产中'
+        else: prod_status = '未开工'
+        for iss in t_issues:
+            quality_list.append({
+                'id': t.id, 'serial_no': t.serial_no, 'product_category': t.product_category or '',
+                'product_draw_no': t.product_draw_no or '', 'product_name': t.product_name,
+                'batch_no': t.batch_no or '', 'total_qty': t.total_qty,
+                'prod_status': prod_status, 'issue_type': '技术' if iss.issue_type == 'tech' else '管理',
+                'dept': iss.dept or '', 'content': (iss.content or '')[:50],
+                'raise_time': iss.raise_time, 'finish_time': iss.finish_time,
+                'days': ((iss.finish_time or now) - iss.raise_time).days if iss.raise_time else 0,
+                'is_shortage': False
+            })
+        for sr in t_shortages:
+            quality_list.append({
+                'id': t.id, 'serial_no': t.serial_no, 'product_category': t.product_category or '',
+                'product_draw_no': t.product_draw_no or '', 'product_name': t.product_name,
+                'batch_no': t.batch_no or '', 'total_qty': t.total_qty,
+                'prod_status': prod_status, 'issue_type': sr.shortage_type or '',
+                'dept': '', 'content': (sr.content or '')[:50],
+                'raise_time': sr.report_time, 'finish_time': sr.arrive_time,
+                'days': ((sr.arrive_time or now) - sr.report_time).days if sr.report_time else 0,
+                'is_shortage': True
+            })
+    year_range = list(range(2024, now.year + 6))
+    resp = make_response(render_template_string(PREVIEW_QUALITY_HTML,
+        quality_list=quality_list, selected_year=selected_year, selected_month=selected_month,
+        year_range=year_range, fmt_date=fmt_date))
+    resp.headers['Cache-Control'] = 'no-cache'
+    return resp
+
 # ---------- 修改意见 ----------
 @app.route('/feedback')
 @login_required
@@ -2849,9 +3170,6 @@ td.highlight-col{background-color:#fff3cd !important}
 <div class="d-flex align-items-center">
 {% if current_user.is_authenticated %}
 <a class="btn btn-outline-light btn-sm me-2 px-3 rounded-pill" href="/tasks">任务列表</a>
-{% if current_user.role.name in ('计调员','管理员') %}
-<a class="btn btn-outline-primary btn-sm me-2 px-3 rounded-pill" href="/planning-report">计划导入</a>
-{% endif %}
 <div class="btn-group me-2">
   <a class="btn btn-outline-info btn-sm dropdown-toggle rounded-pill px-3" data-bs-toggle="dropdown" href="#">功能模块</a>
   <ul class="dropdown-menu">
@@ -2862,6 +3180,8 @@ td.highlight-col{background-color:#fff3cd !important}
         <li><a class="dropdown-item" href="/dashboard">计划看板</a></li>
         <li><a class="dropdown-item" href="/datacenter">数据中心</a></li>
         <li><a class="dropdown-item" href="/admin/notices">发布通知</a></li>
+        <li><a class="dropdown-item" href="/preview/penalty">导出未完成违约金项分析报告</a></li>
+        <li><a class="dropdown-item" href="/preview/quality">导出问题台账</a></li>
       </ul>
     </li>
     <li><hr class="dropdown-divider"></li>
@@ -2872,11 +3192,27 @@ td.highlight-col{background-color:#fff3cd !important}
       <ul class="dropdown-menu sub-dropdown">
         <li><a class="dropdown-item" href="/planning-dashboard">计调看板</a></li>
         <li><a class="dropdown-item" href="/planning-task-report">计调任务填报</a></li>
+        <li><a class="dropdown-item" href="/planning-report">计划导入</a></li>
       </ul>
     </li>
     <li><hr class="dropdown-divider"></li>
     {% endif %}
-    <li><a class="dropdown-item" href="/teamkanban">班组模块</a></li>
+    <li class="dropend">
+      <a class="dropdown-item dropdown-toggle" href="#" data-bs-toggle="dropdown">综合室模块</a>
+      <ul class="dropdown-menu sub-dropdown">
+        <li><a class="dropdown-item" href="/work-hours-summary">工时汇总</a></li>
+        <li><a class="dropdown-item" href="/fund-plan-summary">资金计划汇总</a></li>
+      </ul>
+    </li>
+    <li><hr class="dropdown-divider"></li>
+    <li class="dropend">
+      <a class="dropdown-item dropdown-toggle" href="#" data-bs-toggle="dropdown">班组模块</a>
+      <ul class="dropdown-menu sub-dropdown">
+        <li><a class="dropdown-item" href="/teamkanban">班组看板</a></li>
+        <li><a class="dropdown-item" href="/work-hours">工时填报</a></li>
+        <li><a class="dropdown-item" href="/fund-plan-report">资金计划填报</a></li>
+      </ul>
+    </li>
   </ul>
 </div>
 {% if current_user.role.name == '管理员' %}
@@ -3000,6 +3336,17 @@ TASK_LIST_HTML = BASE_HTML.replace('{% block content %}{% endblock %}','''
   </div>
   <div>
     <input type="text" id="searchInput" class="form-control form-control-sm" style="width: 250px;" placeholder="全局模糊搜索...">
+    <select onchange="var s=document.getElementById('searchInput').value;var cat=location.search.match(/cat=([^&]*)/);var cv=cat?cat[1]:'';window.location.href='/tasks'+(this.value?'?month='+this.value:'')+(cv?'&cat='+cv:'')+(s?'&search='+encodeURIComponent(s):'')" style="width:120px;border-radius:4px;padding:4px 8px;border:1px solid #d1d5db;font-size:13px;background:#fff;">
+      <option value="" {% if not month_filter %}selected{% endif %}>全部月份</option>
+      {% for m in available_months %}<option value="{{m}}" {% if month_filter==m %}selected{% endif %}>{{m}}</option>{% endfor %}
+    </select>
+    <select onchange="var mv=location.search.match(/month=([^&]*)/);var mv2=mv?mv[1]:'';window.location.href='/tasks?cat='+encodeURIComponent(this.value)+(mv2?'&month='+mv2:'')" style="width:100px;border-radius:4px;padding:4px 8px;border:1px solid #d1d5db;font-size:13px;background:#fff;">
+      <option value="" {% if not category_filter %}selected{% endif %}>全部品种</option>
+      <option value="头盔面罩" {% if category_filter=='头盔面罩' %}selected{% endif %}>头盔面罩</option>
+      <option value="服装" {% if category_filter=='服装' %}selected{% endif %}>服装</option>
+      <option value="船囊" {% if category_filter=='船囊' %}selected{% endif %}>船囊</option>
+      <option value="救生衣" {% if category_filter=='救生衣' %}selected{% endif %}>救生衣</option>
+    </select>
   </div>
 </div>
 
@@ -3536,7 +3883,7 @@ DETAILS_HTML = BASE_HTML.replace('{% block content %}{% endblock %}','''
         <input type="hidden" name="delete_issues" id="delete_issues" value="">
         <input type="hidden" name="delete_shortages" id="delete_shortages" value="">
         <button class="btn btn-primary">💾 保存详情信息</button> 
-        <a href="/tasks" class="btn btn-outline-secondary">返回列表</a>
+        <a href="javascript:history.back()" class="btn btn-outline-secondary">返回列表</a>
       </div>
     </form>
   </div>
@@ -4142,7 +4489,8 @@ DATACENTER_HTML = BASE_HTML.replace('{% block content %}{% endblock %}','''
                    <option value="已完成">已完成</option><option value="未完成">未完成</option>
                  </select>
                  {% endif %}
-                 <button class="btn btn-sm btn-outline-dark px-3 rounded-pill" data-export-target="table-{{m.id}}">⬇ 导出当前列表</button>
+                  <button class="btn btn-sm btn-outline-dark px-3 rounded-pill" data-export-target="table-{{m.id}}">⬇ 导出当前列表</button>
+                  <button class="btn btn-sm btn-outline-secondary px-2 rounded-pill dc-col-btn" data-table="table-{{m.id}}" onclick="openDcColSettings('table-{{m.id}}')">⚙ 列设置</button>
              </div>
          </div>
            <div style="overflow-x: auto;">
@@ -4219,9 +4567,76 @@ DATACENTER_HTML = BASE_HTML.replace('{% block content %}{% endblock %}','''
   </div>
 </div>
 
+<!-- 列设置弹窗 -->
+<div class="modal fade" id="dcColModal" tabindex="-1">
+  <div class="modal-dialog modal-sm">
+    <div class="modal-content">
+      <div class="modal-header"><h5 class="modal-title">列设置</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+      <div class="modal-body">
+        <div class="d-flex gap-1 mb-2">
+          <button type="button" class="btn btn-outline-secondary btn-sm" id="dcSelectAll">全选</button>
+          <button type="button" class="btn btn-outline-secondary btn-sm" id="dcSelectNone">全不选</button>
+          <button type="button" class="btn btn-outline-secondary btn-sm" id="dcResetDefault">恢复默认</button>
+        </div>
+        <div id="dcColSortList" class="list-group" style="max-height:400px;overflow-y:auto;"></div>
+      </div>
+      <div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button><button type="button" class="btn btn-primary" id="dcColApplyBtn">应用</button></div>
+    </div>
+  </div>
+</div>
+
 <script>
 var DC_PAGE_SIZE = 20;
 var DC_PAGE_STATE = {};
+var dcCurrentTableId = '';
+
+function openDcColSettings(tableId) {
+  dcCurrentTableId = tableId;
+  var table = document.getElementById(tableId);
+  if (!table) return;
+  var headers = table.querySelectorAll('thead th');
+  var list = document.getElementById('dcColSortList');
+  if (!list) return;
+  list.innerHTML = '';
+  var storageKey = 'dcColSettings_' + tableId;
+  var settings;
+  try { settings = JSON.parse(localStorage.getItem(storageKey)); } catch(e) { settings = null; }
+  if (!settings || !settings.length) {
+    settings = [];
+    headers.forEach(function(th) {
+      var name = th.innerText.trim();
+      if (name) settings.push({ name: name, visible: th.style.display !== 'none' });
+    });
+  }
+  settings.forEach(function(item) {
+    var div = document.createElement('div');
+    div.className = 'list-group-item d-flex align-items-center py-1 px-2';
+    div.setAttribute('draggable', 'true');
+    div.dataset.name = item.name;
+    div.innerHTML = '<span class="me-2 text-muted" style="cursor:grab;">☰</span>' +
+      '<input type="checkbox" class="form-check-input me-2 dc-col-chk" ' + (item.visible !== false ? 'checked' : '') + '>' +
+      '<span style="font-size:13px;">' + item.name + '</span>';
+    (function(item, div) {
+      div.addEventListener('dragstart', function(e) { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', item.name); div.style.opacity = '0.4'; });
+      div.addEventListener('dragend', function() { div.style.opacity = '1'; });
+      div.addEventListener('dragover', function(e) { e.preventDefault(); div.classList.add('drag-over'); });
+      div.addEventListener('dragleave', function() { div.classList.remove('drag-over'); });
+      div.addEventListener('drop', function(e) {
+        e.preventDefault(); div.classList.remove('drag-over');
+        var fromName = e.dataTransfer.getData('text/plain');
+        var fromEl = list.querySelector('[data-name="' + fromName + '"]');
+        if (!fromEl || fromEl === div) return;
+        if (Array.from(list.children).indexOf(fromEl) < Array.from(list.children).indexOf(div))
+          list.insertBefore(fromEl, div.nextSibling);
+        else list.insertBefore(fromEl, div);
+      });
+    })(item, div);
+    list.appendChild(div);
+  });
+  var modal = new bootstrap.Modal(document.getElementById('dcColModal'));
+  modal.show();
+}
+
 
 function getTableDataRows(table) {
     var tbody = table.querySelector('tbody');
@@ -4349,7 +4764,7 @@ function dcAddHeaderFilter(table) {
             if (existing) existing.remove();
             var menu = document.createElement('div');
             menu.id = 'dc-hf-menu';
-            menu.style.cssText = 'position:absolute;background:#fff;border:1px solid #ccc;padding:8px;z-index:9999;max-height:300px;overflow-y:auto;box-shadow:0 4px 8px rgba(0,0,0,0.1);min-width:120px;';
+            menu.style.cssText = 'position:absolute;background:#fff;border:1px solid #ccc;padding:8px;z-index:9999;max-height:350px;overflow-y:auto;box-shadow:0 4px 8px rgba(0,0,0,0.1);min-width:160px;';
             menu.style.left = e.pageX + 'px';
             menu.style.top = e.pageY + 'px';
             var vals = new Set();
@@ -4360,25 +4775,43 @@ function dcAddHeaderFilter(table) {
                 if (r.cells[ci]) vals.add(r.cells[ci].innerText.trim());
             }
             var sorted = Array.from(vals).sort();
-            var html = '<div><label><input type="checkbox" checked class="dc-hf-all"> <b>全选</b></label></div><hr style="margin:4px 0;">';
+            var html = '<input type="text" class="form-control form-control-sm dc-hf-text" placeholder="输入关键词..." style="margin-bottom:6px;font-size:12px;">';
+            html += '<div><label><input type="checkbox" class="dc-hf-all" checked> <b>全选</b></label></div><hr style="margin:4px 0;">';
             sorted.forEach(function(v) {
                 var displayVal = v || '(空白)';
-                html += '<div><label><input type="checkbox" class="dc-hf-chk" value="' + v.replace(/"/g, '&quot;') + '" checked> ' + displayVal + '</label></div>';
+                html += '<div class="dc-hf-row"><label><input type="checkbox" class="dc-hf-chk" value="' + v.replace(/"/g, '&quot;') + '" checked> ' + displayVal + '</label></div>';
             });
             html += '<hr style="margin:4px 0;"><button class="btn btn-sm btn-primary w-100 dc-hf-ok">确定</button>';
+            html += '<button class="btn btn-sm btn-outline-secondary w-100 mt-1 dc-hf-clear">清除筛选</button>';
             menu.innerHTML = html;
             document.body.appendChild(menu);
-            menu.querySelector('.dc-hf-all').onchange = function() {
-                var checked = this.checked;
-                menu.querySelectorAll('.dc-hf-chk').forEach(function(cb) { cb.checked = checked; });
-            };
+
+            var allChk = menu.querySelector('.dc-hf-all');
+            var checkboxes = menu.querySelectorAll('.dc-hf-chk');
+            var textInput = menu.querySelector('.dc-hf-text');
+
+            allChk.onchange = function() { checkboxes.forEach(function(cb) { cb.checked = allChk.checked; }); };
+            
+            // Text input filters checkbox list in real-time
+            textInput.addEventListener('input', function() {
+                var q = textInput.value.toLowerCase();
+                menu.querySelectorAll('.dc-hf-row').forEach(function(row) {
+                    var chk = row.querySelector('.dc-hf-chk');
+                    var val = (chk ? chk.value : '').toLowerCase() || '(空白)';
+                    row.style.display = val.includes(q) ? '' : 'none';
+                });
+            });
+
             menu.querySelector('.dc-hf-ok').onclick = function() {
                 var selected = new Set();
-                menu.querySelectorAll('.dc-hf-chk:checked').forEach(function(cb) { selected.add(cb.value); });
+                checkboxes.forEach(function(cb) { if (cb.checked) selected.add(cb.value); });
+                var txtVal = textInput.value.trim().toLowerCase();
                 var trows = getTableDataRows(table);
                 trows.forEach(function(r) {
                     if (r.cells[ci]) {
-                        var show = selected.has(r.cells[ci].innerText.trim());
+                        var cellText = r.cells[ci].innerText.trim();
+                        var show = selected.has(cellText);
+                        if (txtVal) show = show && cellText.toLowerCase().includes(txtVal);
                         if (show) { r.classList.remove('dc-filter-hidden'); r.style.display = ''; }
                         else { r.classList.add('dc-filter-hidden'); r.style.display = 'none'; }
                     }
@@ -4388,12 +4821,23 @@ function dcAddHeaderFilter(table) {
                 DC_PAGE_STATE[mid] = 1;
                 dcUpdate(mid);
             };
+
+            menu.querySelector('.dc-hf-clear').onclick = function() {
+                var trows = getTableDataRows(table);
+                trows.forEach(function(r) {
+                    r.classList.remove('dc-filter-hidden');
+                    r.style.display = '';
+                });
+                menu.remove();
+                var mid = table.id.replace('table-', '');
+                DC_PAGE_STATE[mid] = 1;
+                dcUpdate(mid);
+            };
+
             setTimeout(function() {
+                textInput.focus();
                 var closeMenu = function(event) {
-                    if (!menu.contains(event.target)) {
-                        menu.remove();
-                        document.removeEventListener('click', closeMenu);
-                    }
+                    if (!menu.contains(event.target)) { menu.remove(); document.removeEventListener('click', closeMenu); }
                 };
                 document.addEventListener('click', closeMenu);
             }, 10);
@@ -4463,6 +4907,60 @@ function dcInitDrag() {
 
 document.addEventListener('DOMContentLoaded', function() {
     dcInitDrag();
+
+    // 列设置按钮事件
+    var dcColApplyBtn = document.getElementById('dcColApplyBtn');
+    if (dcColApplyBtn) dcColApplyBtn.addEventListener('click', function() {
+      var tableId = dcCurrentTableId;
+      var table = document.getElementById(tableId);
+      if (!table) return;
+      var items = document.getElementById('dcColSortList').children;
+      var order = [];
+      for (var i = 0; i < items.length; i++) {
+        var chk = items[i].querySelector('.dc-col-chk');
+        order.push({ name: items[i].dataset.name, visible: chk.checked });
+      }
+      var headers = Array.from(table.querySelectorAll('thead th'));
+      var nameToTh = {};
+      headers.forEach(function(th) { nameToTh[th.innerText.trim()] = th; });
+      var theadTr = table.querySelector('thead tr');
+      headers.forEach(function(th) { theadTr.removeChild(th); });
+      order.forEach(function(item) {
+        var th = nameToTh[item.name];
+        if (th) { theadTr.appendChild(th); th.style.display = item.visible ? '' : 'none'; }
+      });
+      var rows = table.querySelectorAll('tbody tr');
+      rows.forEach(function(r) {
+        var cells = Array.from(r.cells);
+        var nameToCell = {};
+        headers.forEach(function(th, i) { nameToCell[th.innerText.trim()] = cells[i]; });
+        cells.forEach(function(td) { r.removeChild(td); });
+        order.forEach(function(item) {
+          var td = nameToCell[item.name];
+          if (td) { r.appendChild(td); td.style.display = item.visible ? '' : 'none'; }
+        });
+      });
+      var settings = order.map(function(o) { return { name: o.name, visible: o.visible }; });
+      localStorage.setItem('dcColSettings_' + tableId, JSON.stringify(settings));
+      var modal = bootstrap.Modal.getInstance(document.getElementById('dcColModal'));
+      if (modal) modal.hide();
+      dcUpdate(tableId.replace('table-', ''));
+    });
+
+    var dcSelectAll = document.getElementById('dcSelectAll');
+    if (dcSelectAll) dcSelectAll.addEventListener('click', function() {
+      document.querySelectorAll('#dcColSortList .dc-col-chk').forEach(function(c) { c.checked = true; });
+    });
+    var dcSelectNone = document.getElementById('dcSelectNone');
+    if (dcSelectNone) dcSelectNone.addEventListener('click', function() {
+      document.querySelectorAll('#dcColSortList .dc-col-chk').forEach(function(c) { c.checked = false; });
+    });
+    var dcResetDefault = document.getElementById('dcResetDefault');
+    if (dcResetDefault) dcResetDefault.addEventListener('click', function() {
+      localStorage.removeItem('dcColSettings_' + dcCurrentTableId);
+      openDcColSettings(dcCurrentTableId);
+    });
+
     setTimeout(function() {
         document.querySelectorAll('.dc-table').forEach(function(t) {
             dcUpdate(t.id.replace('table-', ''));
@@ -4485,7 +4983,7 @@ TEAM_KANBAN_HTML = BASE_HTML.replace('{% block content %}{% endblock %}','''
 {% block content %}
 <style>
 .stats-bar { display: flex; gap: 12px; margin-bottom: 16px; }
-.stat-card { display: flex; align-items: center; gap: 8px; background: #fff; border-radius: 10px; padding: 10px 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
+.stat-card { display: flex; align-items: center; gap: 8px; background: #fff; border-radius: 8px; padding: 10px 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); border:1px solid #e2e8f0; }
 .stat-icon { font-size: 20px; }
 .stat-num { font-size: 22px; font-weight: 800; line-height: 1.2; }
 .stat-label { font-size: 11px; color: #64748b; }
@@ -4503,7 +5001,7 @@ TEAM_KANBAN_HTML = BASE_HTML.replace('{% block content %}{% endblock %}','''
 
 .kanban-board { display: flex; gap: 12px; padding-bottom: 16px; align-items:stretch; }
 .kanban-board.single-view { overflow-x: auto; }
-.kanban-side-panel { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
+.kanban-side-panel { flex: 0 0 260px; min-width: 240px; display: flex; flex-direction: column; gap: 10px; }
 .task-chart-box { background: #fff; border: 1px solid #e2e8f0; border-radius: 10px; padding: 10px; }
 .task-stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-top: 8px; }
 .task-stat-tile { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 6px 4px; text-align: center; }
@@ -4519,19 +5017,20 @@ TEAM_KANBAN_HTML = BASE_HTML.replace('{% block content %}{% endblock %}','''
 .branch-notice-meta { color: #64748b; font-size: 11px; margin-bottom: 4px; }
 .branch-notice-content { white-space: pre-wrap; color: #334155; font-size: 12px; line-height: 1.5; }
 .branch-notice-empty { color: #94a3b8; font-size: 12px; }
-.kanban-column { flex: 1; min-width: 260px; background: #f8fafc; border-radius: 8px; display: flex; flex-direction: column; max-height: calc(100vh - 170px); border:1px solid #e2e8f0; }
+.kanban-column { flex: 1 1 0; min-width: 300px; background: #f8fafc; border-radius: 8px; display: flex; flex-direction: column; max-height: calc(100vh - 170px); border:1px solid #e2e8f0; }
 .kanban-column.todo, .kanban-column.doing { flex: 1; }
-.kanban-column-header { padding: 12px 16px 10px; font-weight: 700; font-size: 14px; border-radius: 12px 12px 0 0; display: flex; justify-content: space-between; align-items: center; }
+.kanban-column-header { padding: 12px 14px 10px; font-weight: 700; font-size: 14px; border-radius: 8px 8px 0 0; display: flex; justify-content: space-between; align-items: center; gap:6px; }
 .kanban-column-body { padding: 8px 10px; overflow-y: auto; flex: 1; }
 
-.kanban-card { background: #fff; border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); border-left: 4px solid #94a3b8; cursor: pointer; transition: all 0.15s; }
+.kanban-card { background: #fff; border-radius: 8px; padding: 6px 10px; margin-bottom: 6px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); border-left: 4px solid #94a3b8; cursor: pointer; transition: all 0.15s; }
 .kanban-card:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
 .kanban-card.overdue { border-left-color: #ef4444; background: #fef2f2; }
-.kanban-card .card-header-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
-.kanban-card .card-serial { font-weight: 700; font-size: 15px; color: #1e293b; }
+.kanban-card .card-header-row { display: flex; justify-content: space-between; align-items: flex-start; gap:8px; margin-bottom: 4px; }
+.kanban-card .card-serial { font-weight: 700; font-size: 13px; color: #1e293b; }
 .kanban-card .card-badges { display: flex; gap: 4px; flex-wrap: wrap; }
-.kanban-card .card-name { font-weight: 600; font-size: 14px; color: #1e293b; margin-bottom: 4px; }
-.kanban-card .card-meta { font-size: 13px; color: #64748b; line-height: 1.2; display: flex; flex-wrap: wrap; gap: 0 10px; }
+.kanban-card .card-name { font-weight: 600; font-size: 13px; color: #1e293b; margin-bottom: 2px; }
+.kanban-card .card-meta { font-size: 12px; color: #64748b; line-height: 1.35; display: flex; flex-wrap: wrap; gap: 2px 10px; overflow:hidden; }
+.kanban-actions { margin-top:8px; }
 .overdue-tag { background: #fecaca; color: #991b1b; padding: 1px 6px; border-radius: 4px; font-size: 10px; font-weight: 600; }
 .duration-tag { background: #e0e7ff; color: #3730a3; padding: 1px 6px; border-radius: 4px; font-size: 10px; font-weight: 600; }
 .done-tag { background: #d1fae5; color: #065f46; padding: 1px 6px; border-radius: 4px; font-size: 10px; font-weight: 600; }
@@ -4587,6 +5086,8 @@ TEAM_KANBAN_HTML = BASE_HTML.replace('{% block content %}{% endblock %}','''
 .operator-checkbox:hover { background: #f1f5f9; }
 .operator-checkbox input[type=checkbox] { margin: 0; cursor: pointer; }
 
+.member-panel { flex:0 0 285px; min-width:270px; flex-shrink:0; padding:0 4px; }
+.member-stats-container { display:flex; flex-direction:column; gap:6px; margin-bottom:8px; }
 .member-stat-card { background: #fff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 6px 10px; display: flex; align-items: center; gap: 8px; box-shadow: 0 1px 2px rgba(0,0,0,0.04); transition: all 0.15s; }
 .member-stat-card:hover { border-color: #93c5fd; box-shadow: 0 2px 8px rgba(59,130,246,0.12); transform: translateY(-1px); }
 .member-stat-card.active-filter { border-color: #3b82f6; background: #eff6ff; box-shadow: 0 0 0 2px rgba(59,130,246,0.2); }
@@ -4619,7 +5120,7 @@ TEAM_KANBAN_HTML = BASE_HTML.replace('{% block content %}{% endblock %}','''
 <div class="d-flex justify-content-between align-items-center mb-3">
   <h4 class="fw-bold text-dark m-0">班组模块</h4>
   <div style="display:flex;gap:8px;align-items:center;">
-    <select onchange="window.location.href='/teamkanban?month='+this.value+'&team='+encodeURIComponent(document.getElementById('teamSelect').value)" style="width:120px;border-radius:8px;padding:6px 10px;border:1px solid #d1d5db;font-size:13px;font-weight:600;color:#1f2937;background:#fff;cursor:pointer;">
+    <select onchange="var t=document.getElementById('teamSelect').value;window.location.href='/teamkanban?team='+encodeURIComponent(t)+(this.value?'&month='+this.value:'')" style="width:120px;border-radius:8px;padding:6px 10px;border:1px solid #d1d5db;font-size:13px;font-weight:600;color:#1f2937;background:#fff;cursor:pointer;">
       <option value="" {% if not month_filter %}selected{% endif %}>全部月份</option>
       {% for m in available_months %}
       <option value="{{m}}" {% if month_filter == m %}selected{% endif %}>{{m}}</option>
@@ -4660,15 +5161,15 @@ TEAM_KANBAN_HTML = BASE_HTML.replace('{% block content %}{% endblock %}','''
 <div id="singleTeamView">
   {% for team in teams %}
   {% set ns = kanban_data[team] %}
-  <div class="kanban-section" id="kanban-{{team}}" style="display:none;">
+  <div class="kanban-section" id="kanban-{{team}}" style="{% if selected_team == team or (not selected_team and loop.first) %}{% else %}display:none;{% endif %}">
     <div class="kanban-board single-view">
       <div class="kanban-column todo" data-team="{{team}}">
         <div class="kanban-column-header">待处理<span class="badge rounded-pill bg-secondary">{{ns.todo|length}}</span>{% if ns.todo_overdue > 0 %}<span class="badge rounded-pill bg-danger" style="font-size:10px;">{{ns.todo_overdue}}逾期</span>{% endif %}</div>
         <div class="kanban-column-body">
           {% for item in ns.todo %}
           <div class="kanban-card {% if item.is_overdue %}overdue{% endif %}" data-search-text="{{item.serial_no}} {{item.product_name}} {{item.product_draw_no}} {{item.batch_no}} {{item.specific_model}}" data-task-id="{{item.id}}" data-team="{{team}}" data-operator="{{item.operator or ''}}">
-            <div class="card-header-row"><span class="card-serial">{{item.serial_no}}</span><div class="card-badges">{% if item.is_overdue %}<span class="overdue-tag">逾期{{item.overdue_days}}天</span>{% endif %}{% if item.product_category %}<span class="badge bg-light text-dark" style="font-size:9px;">{{item.product_category}}</span>{% endif %}</div></div>
-            <div class="card-meta"><span>{{item.product_draw_no or ''}}</span> <span>{{item.product_name or ''}}</span>{% if item.batch_no %} <span>{{item.batch_no}}</span>{% endif %}{% if item.total_qty %} <span>数量: {{item.total_qty}}</span>{% endif %}</div>
+            <div class="card-header-row"><span class="card-serial">{{item.product_draw_no or ''}}</span><div class="card-badges">{% if item.is_overdue %}<span class="overdue-tag">逾期{{item.overdue_days}}天</span>{% endif %}{% if item.product_category %}<span class="badge bg-light text-dark" style="font-size:9px;">{{item.product_category}}</span>{% endif %}</div></div>
+            <div class="card-meta"><span>{{item.product_name or ''}}</span>{% if item.batch_no %} <span>{{item.batch_no}}</span>{% endif %}{% if item.total_qty %} <span>数量: {{item.total_qty}}</span>{% endif %}</div>
             <div class="card-meta">{% if item.plan_delivery_time %}<span>交付: {{fmt_date(item.plan_delivery_time)}}</span>{% endif %}</div>
             <div class="kanban-actions" style="display:flex;justify-content:space-between;align-items:center;">
               <div>
@@ -4687,8 +5188,8 @@ TEAM_KANBAN_HTML = BASE_HTML.replace('{% block content %}{% endblock %}','''
         <div class="kanban-column-body">
           {% for item in ns.doing %}
           <div class="kanban-card {% if item.is_overdue %}overdue{% endif %}" data-search-text="{{item.serial_no}} {{item.product_name}} {{item.product_draw_no}} {{item.batch_no}} {{item.specific_model}}" data-task-id="{{item.id}}" data-team="{{team}}" data-operator="{{item.operator or ''}}">
-            <div class="card-header-row"><span class="card-serial">{{item.serial_no}}</span><div class="card-badges">{% if item.is_overdue %}<span class="overdue-tag">逾期{{item.overdue_days}}天</span>{% endif %}<span class="duration-tag">已{{item.duration_days}}天</span>{% if item.product_category %}<span class="badge bg-light text-dark" style="font-size:9px;">{{item.product_category}}</span>{% endif %}</div></div>
-            <div class="card-meta"><span>{{item.product_draw_no or ''}}</span> <span>{{item.product_name or ''}}</span>{% if item.batch_no %} <span>{{item.batch_no}}</span>{% endif %}{% if item.total_qty %} <span>数量: {{item.total_qty}}</span>{% endif %}</div>
+            <div class="card-header-row"><span class="card-serial">{{item.product_draw_no or ''}}</span><div class="card-badges">{% if item.is_overdue %}<span class="overdue-tag">逾期{{item.overdue_days}}天</span>{% endif %}<span class="duration-tag">已{{item.duration_days}}天</span>{% if item.product_category %}<span class="badge bg-light text-dark" style="font-size:9px;">{{item.product_category}}</span>{% endif %}</div></div>
+            <div class="card-meta"><span>{{item.product_name or ''}}</span>{% if item.batch_no %} <span>{{item.batch_no}}</span>{% endif %}{% if item.total_qty %} <span>数量: {{item.total_qty}}</span>{% endif %}</div>
             <div class="card-meta"><span>开始: {{fmt_date(item.start_time)}}</span>{% if item.plan_delivery_time %} <span>交付: {{fmt_date(item.plan_delivery_time)}}</span>{% endif %}</div>
             <div class="kanban-actions">
               <div class="operator-row"><span class="operator-label">人员:</span>
@@ -4712,7 +5213,7 @@ TEAM_KANBAN_HTML = BASE_HTML.replace('{% block content %}{% endblock %}','''
         </div>
       </div>
 
-      <div class="member-panel" style="flex:1;min-width:280px;flex-shrink:0;padding:0 4px;">
+      <div class="member-panel">
         <div class="members-dropdown" style="margin-bottom:6px;">
           <div class="members-dropdown-toggle" onclick="event.stopPropagation();toggleMembersDropdown(this)">
             <span>{{team}} 成员</span><span class="members-count" style="font-weight:500;color:#64748b;"></span><span style="font-size:10px;color:#94a3b8;margin-left:2px;">▾</span>
@@ -4725,10 +5226,17 @@ TEAM_KANBAN_HTML = BASE_HTML.replace('{% block content %}{% endblock %}','''
             </div>
           </div>
         </div>
-        <div style="position:relative;max-height:500px;overflow-y:auto;margin-bottom:6px;background:#fff;border-radius:6px;border:1px solid #e2e8f0;padding:6px;"><div style="font-size:14px;font-weight:700;color:#64748b;margin-bottom:2px;">人员统计</div><div style="position:relative;" class="member-chart-wrap"><canvas class="member-stats-chart"></canvas></div></div>
+         <div style="position:relative;max-height:300px;overflow-y:auto;margin-bottom:6px;background:#fff;border-radius:6px;border:1px solid #e2e8f0;padding:6px;">
+          <div style="font-size:14px;font-weight:700;color:#64748b;margin-bottom:6px;display:flex;justify-content:space-between;align-items:center;">
+            <span>人员统计</span>
+            <button class="btn btn-sm btn-outline-secondary py-0 px-2 stat-toggle-btn" style="font-size:11px;" onclick="toggleMemberView(this)">📊 图表</button>
+          </div>
+          <div class="member-stats-container"></div>
+          <div class="member-chart-wrap" style="position:relative;height:220px;display:none;"><canvas class="member-stats-chart"></canvas></div>
+        </div>
         <div class="filter-badge" style="display:none;align-items:center;gap:4px;padding:2px 8px;margin-bottom:4px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:4px;font-size:11px;"><span style="color:#1e40af;font-weight:600;">筛选:</span><span class="filter-name" style="color:#1e40af;"></span><span onclick="clearOperatorFilter()" style="cursor:pointer;color:#94a3b8;font-weight:700;margin-left:auto;">x 清除</span></div>
         <div style="font-size:13px;font-weight:700;color:#374151;margin-bottom:2px;">进行中任务详情</div>
-        <div class="member-task-panel" style="max-height:282px;overflow-y:auto;border:1px solid #e2e8f0;border-radius:6px;padding:3px;background:#fafbfc;display:none;"></div>
+        <div class="member-task-panel" style="max-height:300px;overflow-y:auto;border:1px solid #e2e8f0;border-radius:6px;padding:3px;background:#fafbfc;display:none;"></div>
       </div>
 
       <div class="kanban-side-panel">
@@ -4799,13 +5307,16 @@ var currentOperatorFilter = '';
 
 function $p(sel) { return document.querySelector('#kanban-' + currentTeam + ' ' + sel); }
 
-var membersMap = { {% for team in teams %}'{{team}}': [{% for m in members_data.get(team, []) %}{id:{{m.id}},name:'{{m.name}}'}{% if not loop.last %},{% endif %}{% endfor %}],{% endfor %} };
+var membersMap = {{ members_data|tojson }};
+var memberStatsMap = {{ member_stats_data|tojson }};
+var taskStatsMap = {{ task_stats_data|tojson }};
+var memberTasksMap = {{ member_tasks_data|tojson }};
 
-var memberStatsMap = { {% for team in teams %}'{{team}}': [{% for name, stat in kanban_data[team].member_stats.items() %}{name:'{{name}}',todo:{{stat.todo}},doing:{{stat.doing}},done:{{stat.done}}}{% if not loop.last %},{% endif %}{% endfor %}],{% endfor %} };
-
-var taskStatsMap = { {% for team in teams %}'{{team}}': {todo:{{kanban_data[team].todo|length}}, doing:{{kanban_data[team].doing|length}}, done:{{kanban_data[team].done|length}}, overdue:{{kanban_data[team].overdue_count}}},{% endfor %} };
-
-var memberTasksMap = { {% for team in teams %}'{{team}}': { {% for op, items in kanban_data[team].member_tasks.items() %}'{{op}}': [{% for it in items %}{id:{{it.id}},sn:'{{it.serial_no}}',dn:'{{it.product_draw_no}}',pn:'{{it.product_name}}',bn:'{{it.batch_no}}',qty:{{it.total_qty}}}{% if not loop.last %},{% endif %}{% endfor %}]{% if not loop.last %},{% endif %}{% endfor %}},{% endfor %} };
+function escapeHtml(value) {
+  return String(value == null ? '' : value).replace(/[&<>"']/g, function(ch) {
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch];
+  });
+}
 
 function switchTeam(team) { currentTeam = team; currentOperatorFilter = ''; updateFilterBadge(); updateActiveStatCard(); document.querySelectorAll('#singleTeamView .kanban-section').forEach(function(s) { s.style.display = s.id === 'kanban-' + team ? 'block' : 'none'; }); document.querySelectorAll('.kanban-column.skipped').forEach(function(c) { c.style.display = 'none'; }); renderMembers(team); renderMemberStats(team); renderTaskStats(team); filterKanbanCards(); }
 
@@ -4830,17 +5341,18 @@ function confirmOperator(btn, taskId) {
 }
 document.addEventListener('click', function(e) { if (!e.target.closest('.operator-dropdown')) { document.querySelectorAll('.operator-dropdown-list').forEach(function(l) { l.style.display = 'none'; }); } if (!e.target.closest('.members-dropdown')) { document.querySelectorAll('.members-dropdown-menu').forEach(function(l) { l.style.display = 'none'; }); } });
 
-function renderMembers(team) { var list = $p('.members-list-inner'); var countEl = $p('.members-count'); if (!list) return; var members = membersMap[team] || []; if (countEl) countEl.textContent = '('+members.length+')'; var html = ''; members.forEach(function(m) { html += '<div class="member-tag-row"><span class="member-name-text" data-member-id="'+m.id+'" onclick="event.stopPropagation();editMemberName(this,'+m.id+')" title="点击编辑">'+m.name+'</span><span class="member-remove" onclick="event.stopPropagation();removeMember('+m.id+')">&times;</span></div>'; }); if (!members.length) { html = '<div style="font-size:12px;color:#94a3b8;text-align:center;padding:8px;">暂无成员</div>'; } list.innerHTML = html; }
+function renderMembers(team) { var list = $p('.members-list-inner'); var countEl = $p('.members-count'); if (!list) return; var members = membersMap[team] || []; if (countEl) countEl.textContent = '('+members.length+')'; var html = ''; members.forEach(function(m) { html += '<div class="member-tag-row"><span class="member-name-text" data-member-id="'+m.id+'" onclick="event.stopPropagation();editMemberName(this,'+m.id+')" title="点击编辑">'+escapeHtml(m.name)+'</span><span class="member-remove" onclick="event.stopPropagation();removeMember('+m.id+')">&times;</span></div>'; }); if (!members.length) { html = '<div style="font-size:12px;color:#94a3b8;text-align:center;padding:8px;">暂无成员</div>'; } list.innerHTML = html; }
 
 function editMemberName(el, id) { var oldName = el.textContent; var input = document.createElement('input'); input.type = 'text'; input.value = oldName; input.className = 'member-edit-input'; input.style.cssText = 'width:60px;padding:1px 4px;border:1px solid #3b82f6;border-radius:4px;font-size:12px;outline:none;'; input.onclick = function(e) { e.stopPropagation(); }; input.onkeydown = function(e) { if (e.key === 'Enter') { input.blur(); } if (e.key === 'Escape') { input.value = oldName; input.blur(); } }; input.onblur = function() { var newName = input.value.trim(); if (newName && newName !== oldName) { fetch('/api/kanban/members/edit/' + id, {method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'name='+encodeURIComponent(newName)}).then(function(r){return r.json()}).then(function(data){if(data.ok){membersMap[currentTeam].forEach(function(m){if(m.id===id)m.name=newName});renderMembers(currentTeam);renderMemberStats(currentTeam)}else{alert(data.msg);renderMembers(currentTeam)}}).catch(function(e){alert('编辑失败');renderMembers(currentTeam)}); } else { renderMembers(currentTeam); } }; el.replaceWith(input); input.focus(); input.select(); }
 
-function removeMember(id) { var team = currentTeam; if (!confirm('确定要移除该成员吗？')) return; fetch('/api/kanban/members/remove/' + id, {method:'POST'}).then(function(r){return r.json()}).then(function(data){if(data.ok){membersMap[team]=membersMap[team].filter(function(m){return m.id!==id});renderMembers(team)}else{alert(data.msg)}}).catch(function(e){alert('移除失败: '+e.message)}); }
+function removeMember(id) { var team = currentTeam; if (!confirm('确定要移除该成员吗？')) return; fetch('/api/kanban/members/remove/' + id, {method:'POST'}).then(function(r){return r.json()}).then(function(data){if(data.ok){membersMap[team]=membersMap[team].filter(function(m){return m.id!==id});renderMembers(team);renderMemberStats(team)}else{alert(data.msg)}}).catch(function(e){alert('移除失败: '+e.message)}); }
 
-function addMember() { var input = $p('.new-member-input'); if (!input) return; var name = input.value.trim(); if (!name) return; fetch('/api/kanban/members/add', {method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'team='+encodeURIComponent(currentTeam)+'&name='+encodeURIComponent(name)}).then(function(r){return r.json()}).then(function(data){if(data.ok){membersMap[currentTeam].push({id:data.id,name:name});renderMembers(currentTeam);input.value=''}else{alert(data.msg)}}).catch(function(e){alert('添加失败: '+e.message)}); }
+function addMember() { var input = $p('.new-member-input'); if (!input) return; var name = input.value.trim(); if (!name) return; fetch('/api/kanban/members/add', {method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'team='+encodeURIComponent(currentTeam)+'&name='+encodeURIComponent(name)}).then(function(r){return r.json()}).then(function(data){if(data.ok){membersMap[currentTeam].push({id:data.id,name:name});renderMembers(currentTeam);renderMemberStats(currentTeam);input.value=''}else{alert(data.msg)}}).catch(function(e){alert('添加失败: '+e.message)}); }
 
 function toggleMembersDropdown(el) { var menu = el.parentElement.querySelector('.members-dropdown-menu'); var isOpen = menu.style.display === 'block'; document.querySelectorAll('.members-dropdown-menu').forEach(function(m) { m.style.display = 'none'; }); if (!isOpen) { menu.style.display = 'block'; } }
+function toggleMemberView(btn) { var panel = btn.closest('.member-panel'); if (!panel) return; var cards = panel.querySelector('.member-stats-container'); var chart = panel.querySelector('.member-chart-wrap'); if (!cards || !chart) return; if (cards.style.display === 'none') { cards.style.display = ''; chart.style.display = 'none'; btn.textContent = '📊 图表'; } else { cards.style.display = 'none'; chart.style.display = ''; btn.textContent = '📋 卡片'; } }
 
-function renderMemberStats(team) { var container = $p('.member-stats-container'); var stats = memberStatsMap[team] || []; var members = membersMap[team] || []; var merged = {}; members.forEach(function(m) { merged[m.name] = {name: m.name, todo: 0, doing: 0, done: 0}; }); stats.forEach(function(s) { if (!merged[s.name]) return; merged[s.name].todo += s.todo; merged[s.name].doing += s.doing; merged[s.name].done += s.done; }); var chartData = Object.values(merged); chartData.sort(function(a, b) { return (b.todo + b.doing + b.done) - (a.todo + a.doing + a.done); }); if (!chartData.length) { if (container) container.innerHTML = '<span style="font-size:12px;color:#94a3b8;">暂无人员任务统计</span>'; if (window.memberChart) { window.memberChart.destroy(); window.memberChart = null; } renderMemberTaskPanel(team); return; } var html = ''; chartData.forEach(function(s) { var total = s.todo + s.doing + s.done; var escapedName = s.name.replace(/'/g, "&#39;"); html += '<div class="member-stat-card" data-op-name="'+escapedName+'" style="cursor:pointer;" title="点击筛选该人员的任务"><div class="member-stat-name">'+s.name+'</div><div class="member-stat-nums"><span class="member-stat-num todo-num">'+s.todo+'</span><span class="member-stat-num doing-num">'+s.doing+'</span><span class="member-stat-num done-num">'+s.done+'</span></div><div class="member-stat-bar"><div class="member-stat-bar-fill" style="width:'+(total?Math.round(s.done/total*100):0)+'%"></div></div></div>'; }); if (container) container.innerHTML = html; renderMemberTaskPanel(team); var canvas = $p('.member-stats-chart'); if (!canvas) return; var ctx = canvas.getContext('2d'); if (window.memberChart) { window.memberChart.destroy(); } var labels = chartData.map(function(s) { return s.name; }); window.memberChart = new Chart(ctx, {type:'bar',data:{labels:labels,datasets:[{label:'待处理',data:chartData.map(function(s){return s.todo}),backgroundColor:'#94a3b8',borderRadius:4},{label:'处理中',data:chartData.map(function(s){return s.doing}),backgroundColor:'#f59e0b',borderRadius:4},{label:'已完成',data:chartData.map(function(s){return s.done}),backgroundColor:'#10b981',borderRadius:4}]},options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,plugins:{legend:{position:'top',labels:{boxWidth:12,padding:8,font:{size:11}}},datalabels:{display:false}},scales:{x:{stacked:true,ticks:{stepSize:1,font:{size:10}},grid:{display:false}},y:{stacked:true,ticks:{font:{size:11}}}}}}); var chartWrap=$p('.member-chart-wrap'); if(chartWrap){var h=Math.max(350,chartData.length*18+50);chartWrap.style.height=h+'px';} }
+function renderMemberStats(team) { var container = $p('.member-stats-container'); var chartWrap = $p('.member-chart-wrap'); var stats = memberStatsMap[team] || []; var members = membersMap[team] || []; var merged = {}; members.forEach(function(m) { merged[m.name] = {name: m.name, todo: 0, doing: 0, done: 0}; }); stats.forEach(function(s) { if (!merged[s.name]) return; merged[s.name].todo += s.todo; merged[s.name].doing += s.doing; merged[s.name].done += s.done; }); var chartData = Object.values(merged); chartData.sort(function(a, b) { return (b.todo + b.doing + b.done) - (a.todo + a.doing + a.done); }); if (!chartData.length) { if (container) container.innerHTML = '<span style="font-size:12px;color:#94a3b8;">暂无人员任务统计</span>'; if (chartWrap) chartWrap.style.display = 'none'; if (window.memberChart) { window.memberChart.destroy(); window.memberChart = null; } renderMemberTaskPanel(team); return; } var html = ''; chartData.forEach(function(s) { var total = s.todo + s.doing + s.done; var escapedName = s.name.replace(/'/g, "&#39;"); html += '<div class="member-stat-card" data-op-name="'+escapedName+'" style="cursor:pointer;" title="点击筛选该人员的任务"><div class="member-stat-name">'+s.name+'</div><div class="member-stat-nums"><span class="member-stat-num todo-num">'+s.todo+'</span><span class="member-stat-num doing-num">'+s.doing+'</span><span class="member-stat-num done-num">'+s.done+'</span></div><div class="member-stat-bar"><div class="member-stat-bar-fill" style="width:'+(total?Math.round(s.done/total*100):0)+'%"></div></div></div>'; }); if (container) container.innerHTML = html; renderMemberTaskPanel(team); if (chartWrap) chartWrap.style.height = Math.max(220, chartData.length * 24 + 80) + 'px'; var canvas = $p('.member-stats-chart'); if (!canvas) return; var ctx = canvas.getContext('2d'); if (window.memberChart) { window.memberChart.destroy(); } var labels = chartData.map(function(s) { return s.name; }); window.memberChart = new Chart(ctx, {type:'bar',data:{labels:labels,datasets:[{label:'待处理',data:chartData.map(function(s){return s.todo}),backgroundColor:'#94a3b8',borderRadius:4},{label:'处理中',data:chartData.map(function(s){return s.doing}),backgroundColor:'#d97706',borderRadius:4},{label:'已完成',data:chartData.map(function(s){return s.done}),backgroundColor:'#10b981',borderRadius:4}]},options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,scales:{x:{stacked:true,ticks:{stepSize:1,font:{size:10}}},y:{stacked:true,ticks:{font:{size:11}}}},plugins:{legend:{position:'top',labels:{boxWidth:12,padding:8,font:{size:11}}},datalabels:{display:false}}}}); }
 
 function renderMemberTaskPanel(team) { var panel = $p('.member-task-panel'); if (!panel) return; var tasks = memberTasksMap[team] || {}; var members = membersMap[team] || []; var memberNames = members.map(function(m) { return m.name; }); var names = Object.keys(tasks).filter(function(n) { return memberNames.indexOf(n) !== -1; }); if (!names.length) { panel.style.display = 'none'; return; } names.sort(function(a, b) { return tasks[b].length - tasks[a].length; }); var html = ''; names.forEach(function(name) { html += '<div style="font-size:14px;font-weight:700;color:#1e293b;padding:2px 6px;background:#e2e8f0;border-radius:3px;margin-bottom:2px;">'+name+' ('+tasks[name].length+')</div>'; tasks[name].forEach(function(t) { html += '<div class="member-task-item" data-task-id="'+t.id+'" style="padding:2px 6px;"><span class="mt-sn">'+t.sn+'</span><span class="mt-info">'+t.pn+' | '+t.dn+(t.bn?' | '+t.bn:'')+'</span><span class="mt-qty">'+t.qty+'</span></div>'; }); }); panel.innerHTML = html; panel.style.display = 'block'; }
 
@@ -4899,6 +5411,91 @@ function showSkippedModal() {
   var modal = new bootstrap.Modal(document.getElementById('skippedModal'));
   modal.show();
 }
+
+function renderMemberStats(team) {
+  var container = $p('.member-stats-container');
+  var stats = memberStatsMap[team] || [];
+  var members = membersMap[team] || [];
+  var merged = {};
+  members.forEach(function(m) { merged[m.name] = {name: m.name, todo: 0, doing: 0, done: 0}; });
+  stats.forEach(function(s) {
+    if (!merged[s.name]) return;
+    merged[s.name].todo += s.todo || 0;
+    merged[s.name].doing += s.doing || 0;
+    merged[s.name].done += s.done || 0;
+  });
+  var chartData = Object.values(merged).sort(function(a, b) {
+    return (b.todo + b.doing + b.done) - (a.todo + a.doing + a.done);
+  });
+  if (container) {
+    if (!chartData.length) {
+      container.innerHTML = '<div style="font-size:12px;color:#94a3b8;text-align:center;padding:8px;">暂无人员任务统计</div>';
+    } else {
+      container.innerHTML = chartData.map(function(s) {
+        var total = s.todo + s.doing + s.done;
+        var pct = total ? Math.round(s.done / total * 100) : 0;
+        return '<div class="member-stat-card" data-op-name="'+escapeHtml(s.name)+'" style="cursor:pointer;" title="点击筛选该人员的任务">'
+          + '<div class="member-stat-name">'+escapeHtml(s.name)+'</div>'
+          + '<div class="member-stat-nums"><span class="member-stat-num todo-num">'+s.todo+'</span><span class="member-stat-num doing-num">'+s.doing+'</span><span class="member-stat-num done-num">'+s.done+'</span></div>'
+          + '<div class="member-stat-bar"><div class="member-stat-bar-fill" style="width:'+pct+'%"></div></div>'
+          + '</div>';
+      }).join('');
+    }
+  }
+  renderMemberTaskPanel(team);
+  var canvas = $p('.member-stats-chart');
+  if (!canvas) return;
+  if (window.memberChart) { window.memberChart.destroy(); }
+  if (!chartData.length) {
+    window.memberChart = null;
+    return;
+  }
+  var chartWrap = $p('.member-chart-wrap');
+  if (chartWrap) chartWrap.style.height = Math.max(220, chartData.length * 24 + 80) + 'px';
+  window.memberChart = new Chart(canvas.getContext('2d'), {
+    type:'bar',
+    data:{
+      labels:chartData.map(function(s) { return s.name; }),
+      datasets:[
+        {label:'待处理',data:chartData.map(function(s){return s.todo}),backgroundColor:'#94a3b8',borderRadius:4},
+        {label:'处理中',data:chartData.map(function(s){return s.doing}),backgroundColor:'#f59e0b',borderRadius:4},
+        {label:'已完成',data:chartData.map(function(s){return s.done}),backgroundColor:'#10b981',borderRadius:4}
+      ]
+    },
+    options:{
+      indexAxis:'y', responsive:true, maintainAspectRatio:false,
+      plugins:{legend:{position:'top',labels:{boxWidth:12,padding:8,font:{size:11}}},datalabels:{display:false}},
+      scales:{x:{stacked:true,ticks:{stepSize:1,font:{size:10}},grid:{display:false}},y:{stacked:true,ticks:{font:{size:11}}}}
+    }
+  });
+}
+
+function renderMemberTaskPanel(team) {
+  var panel = $p('.member-task-panel');
+  if (!panel) return;
+  var tasks = memberTasksMap[team] || {};
+  var memberNames = (membersMap[team] || []).map(function(m) { return m.name; });
+  var names = Object.keys(tasks).filter(function(n) { return memberNames.indexOf(n) !== -1; });
+  if (!names.length) {
+    panel.innerHTML = '';
+    panel.style.display = 'none';
+    return;
+  }
+  names.sort(function(a, b) { return tasks[b].length - tasks[a].length; });
+  panel.innerHTML = names.map(function(name) {
+    var rows = tasks[name].map(function(t) {
+      return '<div class="member-task-item" data-task-id="'+t.id+'" style="padding:2px 6px;" onclick="window.open(\\'/task/'+t.id+'/details\\',\\'_blank\\')">'
+        + '<span class="mt-sn">'+escapeHtml(t.sn)+'</span>'
+        + '<span class="mt-info">'+escapeHtml(t.pn)+' | '+escapeHtml(t.dn)+(t.bn ? ' | '+escapeHtml(t.bn) : '')+'</span>'
+        + '<span class="mt-qty">'+escapeHtml(t.qty)+'</span>'
+        + '</div>';
+    }).join('');
+    return '<div style="font-size:14px;font-weight:700;color:#1e293b;padding:2px 6px;background:#e2e8f0;border-radius:3px;margin-bottom:2px;">'
+      + escapeHtml(name)+' ('+tasks[name].length+')</div>' + rows;
+  }).join('');
+  panel.style.display = 'block';
+}
+
 (function init() { var firstTeam = '{{selected_team if selected_team else teams[0]}}'; document.querySelectorAll('#singleTeamView .kanban-section').forEach(function(s) { s.style.display = s.id === 'kanban-' + firstTeam ? 'block' : 'none'; }); renderMembers(firstTeam); renderMemberStats(firstTeam); renderTaskStats(firstTeam); document.getElementById('singleTeamView').addEventListener('click', function(e) { var card = e.target.closest('.member-stat-card'); if (card && card.dataset.opName) { var name = card.dataset.opName.replace(/&#39;/g, "'"); filterByOperator(name); } }); })();
 
 document.addEventListener('keydown', function(e) { if ((e.ctrlKey || e.metaKey) && e.key === 'k') { e.preventDefault(); document.getElementById('kanbanSearch').focus(); } });
@@ -5300,7 +5897,7 @@ document.getElementById('batchSubmitBtn').addEventListener('click', async () => 
 PLANNING_DASHBOARD_HTML = BASE_HTML.replace('{% block content %}{% endblock %}','''
 {% block content %}
 <div class="container-fluid">
-  <h4 class="mb-3 fw-bold text-primary">📊 计调模块</h4>
+  <h4 class="mb-3 fw-bold text-primary">📊 计调看板</h4>
 
   <!-- 概览卡片 -->
   <div class="row g-3 mb-3">
@@ -5411,7 +6008,7 @@ PLANNING_DASHBOARD_HTML = BASE_HTML.replace('{% block content %}{% endblock %}',
         </div>
         <div style="max-height:400px;overflow-y:auto;">
           <table class="table table-sm table-hover mb-0">
-            <thead class="table-light"><tr><th>序号</th><th>图号/批次</th><th>类型</th><th>部门</th><th>内容</th><th>提出</th><th>天数</th></tr></thead>
+            <thead class="table-light" style="position:sticky;top:0;z-index:5;"><tr><th>序号</th><th>图号/批次</th><th>类型</th><th>部门</th><th>内容</th><th>提出</th><th>天数</th></tr></thead>
             <tbody>
             {% for i in issue_ledger %}
             <tr>
@@ -5439,7 +6036,7 @@ PLANNING_DASHBOARD_HTML = BASE_HTML.replace('{% block content %}{% endblock %}',
         </div>
         <div style="max-height:400px;overflow-y:auto;">
           <table class="table table-sm table-hover mb-0">
-            <thead class="table-light"><tr><th>序号</th><th>图号/批次</th><th>类型</th><th>内容</th><th>报缺</th><th>天数</th></tr></thead>
+            <thead class="table-light" style="position:sticky;top:0;z-index:5;"><tr><th>序号</th><th>图号/批次</th><th>类型</th><th>内容</th><th>报缺</th><th>天数</th></tr></thead>
             <tbody>
             {% for s in shortage_ledger %}
             <tr>
@@ -6049,6 +6646,306 @@ NOTICES_HTML = BASE_HTML.replace('{% block content %}{% endblock %}','''
     {% endfor %}
     </div>
   </div>
+</div>
+{% endblock %}''')
+
+PREVIEW_PENALTY_HTML = BASE_HTML.replace('{% block content %}{% endblock %}','''
+{% block content %}
+<div class="container-fluid">
+  <h4 class="mb-3 fw-bold text-primary">📋 未完成违约金项分析报告预览</h4>
+  <div class="d-flex gap-2 align-items-center mb-3">
+    <select class="form-select form-select-sm" style="width:100px;" onchange="location.href='/preview/penalty?year='+this.value+'&month={{selected_month}}'">{% for y in year_range %}<option value="{{y}}" {% if y==selected_year %}selected{% endif %}>{{y}}</option>{% endfor %}</select>
+    <select class="form-select form-select-sm" style="width:80px;" onchange="location.href='/preview/penalty?year={{selected_year}}&month='+this.value">{% for m in range(1,13) %}<option value="{{m}}" {% if m==selected_month %}selected{% endif %}>{{m}}月</option>{% endfor %}</select>
+    <span class="text-muted small">共 {{ penalty_list|length }} 项，产值 {{ "%.2f"|format(total_val) }} 万元</span>
+    <a href="/export/penalty?year={{selected_year}}&month={{selected_month}}" class="btn btn-sm btn-primary ms-auto px-3">📥 下载Word报告</a>
+  </div>
+  <div class="table-responsive" style="max-height:calc(100vh - 200px);">
+    <table class="table table-sm table-bordered table-hover">
+      <thead class="table-light" style="position:sticky;top:0;z-index:5;"><tr><th>序号</th><th>品种</th><th>图号</th><th>产品名称</th><th>批次</th><th>数量</th><th>要求交付</th><th>交总检</th><th>入库</th><th>状态</th><th>产值</th></tr></thead>
+      <tbody>
+      {% for t in penalty_list %}
+      <tr>
+        <td><a href="/task/{{ t.id }}/details" class="text-decoration-none fw-bold">{{ t.serial_no }}</a></td>
+        <td>{{ t.product_category }}</td>
+        <td>{{ t.product_draw_no }}</td>
+        <td>{{ t.product_name }}</td>
+        <td>{{ t.batch_no }}</td>
+        <td>{{ t.total_qty or '' }}</td>
+        <td>{{ fmt_date(t.plan_delivery_time) }}</td>
+        <td>{{ fmt_date(t.final_check_time) }}</td>
+        <td>{{ fmt_date(t.storage_time) }}</td>
+        <td>{{ t.production_status }}</td>
+        <td>{{ "%.2f"|format(t.output_value) }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="11" class="text-center text-muted py-4">当月无违约金任务</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}''')
+
+PREVIEW_QUALITY_HTML = BASE_HTML.replace('{% block content %}{% endblock %}','''
+{% block content %}
+<div class="container-fluid">
+  <h4 class="mb-3 fw-bold text-primary">📋 问题台账预览</h4>
+  <div class="d-flex gap-2 align-items-center mb-3">
+    <select class="form-select form-select-sm" style="width:100px;" onchange="location.href='/preview/quality?year='+this.value+'&month={{selected_month}}'">{% for y in year_range %}<option value="{{y}}" {% if y==selected_year %}selected{% endif %}>{{y}}</option>{% endfor %}</select>
+    <select class="form-select form-select-sm" style="width:80px;" onchange="location.href='/preview/quality?year={{selected_year}}&month='+this.value">{% for m in range(1,13) %}<option value="{{m}}" {% if m==selected_month %}selected{% endif %}>{{m}}月</option>{% endfor %}</select>
+    <span class="text-muted small">共 {{ quality_list|length }} 条记录</span>
+    <a href="/export/quality?year={{selected_year}}&month={{selected_month}}" class="btn btn-sm btn-primary ms-auto px-3">📥 下载Excel报告</a>
+  </div>
+  <div class="table-responsive" style="max-height:calc(100vh - 200px);">
+    <table class="table table-sm table-bordered table-hover">
+      <thead class="table-light" style="position:sticky;top:0;z-index:5;"><tr><th>序号</th><th>品种</th><th>图号</th><th>产品名称</th><th>批次</th><th>数量</th><th>类型</th><th>部门</th><th>内容</th><th>提出</th><th>完成</th><th>天数</th><th>状态</th></tr></thead>
+      <tbody>
+      {% for q in quality_list %}
+      <tr>
+        <td><a href="/task/{{ q.id }}/details" class="text-decoration-none fw-bold">{{ q.serial_no }}</a></td>
+        <td>{{ q.product_category }}</td>
+        <td>{{ q.product_draw_no }}</td>
+        <td>{{ q.product_name }}</td>
+        <td>{{ q.batch_no }}</td>
+        <td>{{ q.total_qty or '' }}</td>
+        <td><span class="badge {% if q.is_shortage %}bg-secondary{% elif q.issue_type=='技术' %}bg-primary{% else %}bg-warning text-dark{% endif %}">{{ q.issue_type }}</span></td>
+        <td>{{ q.dept }}</td>
+        <td class="small text-muted">{{ q.content }}</td>
+        <td>{{ fmt_date(q.raise_time) }}</td>
+        <td>{{ fmt_date(q.finish_time) }}</td>
+        <td>{{ q.days }}</td>
+        <td>{{ q.prod_status }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="13" class="text-center text-muted py-4">当月无问题记录</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}''')
+
+WORK_HOURS_HTML = BASE_HTML.replace('{% block content %}{% endblock %}','''
+{% block content %}
+<div class="container-fluid" style="max-width:1200px;">
+  <h4 class="mb-3 fw-bold text-primary">⏱ 工时填报</h4>
+
+  <!-- 填报表单 -->
+  <div class="card shadow-sm mb-3">
+    <div class="card-header bg-light fw-bold">新增工时记录</div>
+    <div class="card-body">
+      <div class="row g-2">
+        <div class="col-md-2">
+          <select id="whTeam" class="form-select form-select-sm" onchange="var v=this.value;window.location.href='/work-hours'+(v?'?team='+encodeURIComponent(v):'')">
+            <option value="">全部班组</option>
+            {% for t in teams %}<option value="{{t}}" {% if team_filter==t %}selected{% endif %}>{{t}}</option>{% endfor %}
+          </select>
+        </div>
+        <div class="col-md-3">
+          <select id="whTask" class="form-select form-select-sm">
+            <option value="">选择任务</option>
+            {% for t in tasks %}<option value="{{t.id}}">{{t.serial_no}} {{t.product_draw_no or ''}} {{t.product_name}}</option>{% endfor %}
+          </select>
+        </div>
+        <div class="col-md-2"><input type="text" id="whWorker" class="form-control form-control-sm" placeholder="人员姓名"></div>
+        <div class="col-md-1"><input type="number" id="whHours" class="form-control form-control-sm" placeholder="工时" step="0.5"></div>
+        <div class="col-md-2"><input type="date" id="whDate" class="form-control form-control-sm"></div>
+        <div class="col-md-2"><input type="text" id="whContent" class="form-control form-control-sm" placeholder="工作内容 (选填)"></div>
+      </div>
+      <button id="whSubmit" class="btn btn-primary btn-sm mt-2 px-4">提交</button>
+      <span id="whMsg" class="ms-2"></span>
+    </div>
+  </div>
+
+  <!-- 记录列表 -->
+  <div class="card shadow-sm">
+    <div class="card-header bg-light fw-bold">工时记录 ({{ records|length }})</div>
+    <div class="table-responsive" style="max-height:calc(100vh - 300px);">
+      <table class="table table-sm table-hover mb-0">
+        <thead class="table-light" style="position:sticky;top:0;z-index:5;"><tr><th>日期</th><th>班组</th><th>任务</th><th>人员</th><th>工时</th><th>内容</th><th>填报时间</th></tr></thead>
+        <tbody>
+        {% for r in records %}
+        {% set task = tasks|selectattr('id','equalto',r.task_id)|list|first %}
+        <tr>
+          <td>{{ fmt_date(r.work_date) }}</td>
+          <td>{{ r.team }}</td>
+          <td class="small">{% if task %}{{ task.serial_no }} {{ task.product_draw_no or '' }}{% endif %}</td>
+          <td>{{ r.worker }}</td>
+          <td>{{ r.hours }}</td>
+          <td class="small text-muted">{{ r.content or '' }}</td>
+          <td class="small">{{ fmt_date(r.created_time) }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="7" class="text-center text-muted py-4">暂无工时记录</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+document.getElementById('whSubmit').addEventListener('click', function() {
+  var taskId = document.getElementById('whTask').value;
+  if (!taskId) { alert('请选择任务'); return; }
+  var worker = document.getElementById('whWorker').value.trim();
+  if (!worker) { alert('请填写人员姓名'); return; }
+  var hours = document.getElementById('whHours').value;
+  if (!hours) { alert('请填写工时'); return; }
+  var msg = document.getElementById('whMsg');
+  msg.innerHTML = '<span class="text-info">提交中...</span>';
+  var teamSelect = document.getElementById('whTeam');
+  fetch('/api/work-hours/add', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({
+      task_id: parseInt(taskId),
+      team: teamSelect.value,
+      worker: worker,
+      hours: hours,
+      work_date: document.getElementById('whDate').value,
+      content: document.getElementById('whContent').value
+    })
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    if (d.success) { location.reload(); }
+    else { msg.innerHTML = '<span class="text-danger">' + (d.error||'提交失败') + '</span>'; }
+  })
+  .catch(function() { msg.innerHTML = '<span class="text-danger">网络错误</span>'; });
+});
+</script>
+{% endblock %}''')
+
+WORK_HOURS_SUMMARY_HTML = BASE_HTML.replace('{% block content %}{% endblock %}','''
+{% block content %}
+<div class="container-fluid" style="max-width:1000px;">
+  <h4 class="mb-3 fw-bold text-primary">⏱ 工时汇总</h4>
+  <div class="d-flex gap-2 mb-3">
+    <select class="form-select form-select-sm" style="width:140px;" onchange="location.href='/work-hours-summary'+(this.value?'?team='+encodeURIComponent(this.value):'')">
+      <option value="">全部班组</option>
+      {% for t in teams %}<option value="{{t}}" {% if team_filter==t %}selected{% endif %}>{{t}}</option>{% endfor %}
+    </select>
+    <span class="align-self-center text-muted small">合计: <strong>{{ "%.1f"|format(total_all) }}</strong> 工时</span>
+  </div>
+  {% for team in summary %}
+  {% set data = summary[team] %}
+  <div class="card shadow-sm mb-2">
+    <div class="card-header bg-light fw-bold d-flex justify-content-between"><span>{{ team }}</span><span>{{ "%.1f"|format(data.total) }} 工时</span></div>
+    <div class="card-body p-2">
+      <table class="table table-sm mb-0">
+        <thead><tr><th>人员</th><th class="text-end">工时</th></tr></thead>
+        <tbody>
+        {% for worker, hrs in data.workers.items()|sort(attribute='1', reverse=True) %}
+        <tr><td>{{ worker }}</td><td class="text-end">{{ "%.1f"|format(hrs) }}</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% else %}
+  <div class="text-center text-muted py-4">暂无工时数据</div>
+  {% endfor %}
+</div>
+{% endblock %}''')
+
+FUND_PLAN_REPORT_HTML = BASE_HTML.replace('{% block content %}{% endblock %}','''
+{% block content %}
+<div class="container-fluid" style="max-width:1100px;">
+  <h4 class="mb-3 fw-bold text-primary">💰 资金计划填报</h4>
+  <div class="card shadow-sm mb-3">
+    <div class="card-header bg-light fw-bold">新增资金计划</div>
+    <div class="card-body">
+      <div class="row g-2">
+        <div class="col-md-2">
+          <select id="fpTeam" class="form-select form-select-sm" onchange="var v=this.value;window.location.href='/fund-plan-report'+(v?'?team='+encodeURIComponent(v):'')">
+            <option value="">全部班组</option>
+            {% for t in teams %}<option value="{{t}}" {% if team_filter==t %}selected{% endif %}>{{t}}</option>{% endfor %}
+          </select>
+        </div>
+        <div class="col-md-2"><input type="month" id="fpMonth" class="form-control form-control-sm"></div>
+        <div class="col-md-2"><input type="text" id="fpCategory" class="form-control form-control-sm" placeholder="类别"></div>
+        <div class="col-md-3"><input type="text" id="fpItemName" class="form-control form-control-sm" placeholder="项目名称"></div>
+        <div class="col-md-1"><input type="number" id="fpAmount" class="form-control form-control-sm" placeholder="金额" step="0.01"></div>
+        <div class="col-md-2"><input type="text" id="fpRemark" class="form-control form-control-sm" placeholder="备注"></div>
+      </div>
+      <button id="fpSubmit" class="btn btn-primary btn-sm mt-2 px-4">提交</button>
+      <span id="fpMsg" class="ms-2"></span>
+    </div>
+  </div>
+  <div class="card shadow-sm">
+    <div class="card-header bg-light fw-bold">资金计划记录 ({{ records|length }})</div>
+    <div class="table-responsive" style="max-height:calc(100vh - 300px);">
+      <table class="table table-sm table-hover mb-0">
+        <thead class="table-light" style="position:sticky;top:0;z-index:5;"><tr><th>月份</th><th>班组</th><th>类别</th><th>项目名称</th><th>金额</th><th>备注</th><th>填报时间</th></tr></thead>
+        <tbody>
+        {% for r in records %}
+        <tr>
+          <td>{{ r.plan_month }}</td><td>{{ r.team }}</td><td>{{ r.category }}</td>
+          <td>{{ r.item_name }}</td><td class="text-end">{{ "%.2f"|format(r.amount or 0) }}</td>
+          <td class="small text-muted">{{ r.remark or '' }}</td>
+          <td class="small">{{ fmt_date(r.created_time) }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="7" class="text-center text-muted py-4">暂无记录</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+<script>
+document.getElementById('fpSubmit').addEventListener('click', function() {
+  var itemName = document.getElementById('fpItemName').value.trim();
+  if (!itemName) { alert('请填写项目名称'); return; }
+  var msg = document.getElementById('fpMsg');
+  msg.innerHTML = '<span class="text-info">提交中...</span>';
+  fetch('/api/fund-plan/add', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({
+      team: document.getElementById('fpTeam').value,
+      plan_month: document.getElementById('fpMonth').value,
+      category: document.getElementById('fpCategory').value,
+      item_name: itemName,
+      amount: document.getElementById('fpAmount').value,
+      remark: document.getElementById('fpRemark').value
+    })
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(d) { if (d.success) { location.reload(); } else { msg.innerHTML = '<span class="text-danger">' + (d.error||'提交失败') + '</span>'; } })
+  .catch(function() { msg.innerHTML = '<span class="text-danger">网络错误</span>'; });
+});
+</script>
+{% endblock %}''')
+
+FUND_PLAN_SUMMARY_HTML = BASE_HTML.replace('{% block content %}{% endblock %}','''
+{% block content %}
+<div class="container-fluid" style="max-width:1000px;">
+  <h4 class="mb-3 fw-bold text-primary">💰 资金计划汇总</h4>
+  <div class="d-flex gap-2 mb-3">
+    <select class="form-select form-select-sm" style="width:140px;" onchange="location.href='/fund-plan-summary'+(this.value?'?team='+encodeURIComponent(this.value):'')">
+      <option value="">全部班组</option>
+      {% for t in teams %}<option value="{{t}}" {% if team_filter==t %}selected{% endif %}>{{t}}</option>{% endfor %}
+    </select>
+    <span class="align-self-center text-muted small">合计: <strong>{{ "%.2f"|format(total_all) }}</strong> 万元</span>
+  </div>
+  {% for team in summary %}
+  {% set data = summary[team] %}
+  <div class="card shadow-sm mb-2">
+    <div class="card-header bg-light fw-bold d-flex justify-content-between"><span>{{ team }}</span><span>{{ "%.2f"|format(data.total) }} 万元</span></div>
+    <div class="card-body p-0">
+      <table class="table table-sm mb-0">
+        <thead><tr><th>月份</th><th>类别</th><th>项目名称</th><th class="text-end">金额</th><th>备注</th></tr></thead>
+        <tbody>
+        {% for item in data['items'] %}
+        <tr><td>{{ item.plan_month }}</td><td>{{ item.category }}</td><td>{{ item.item_name }}</td><td class="text-end">{{ "%.2f"|format(item.amount) }}</td><td class="small text-muted">{{ item.remark or '' }}</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% else %}
+  <div class="text-center text-muted py-4">暂无资金计划数据</div>
+  {% endfor %}
 </div>
 {% endblock %}''')
 
